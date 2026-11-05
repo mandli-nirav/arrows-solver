@@ -17,7 +17,8 @@ private const val DEFAULT_LINE = 0xACB4F4
 /**
  * One screenshot, classified per pixel. Colours were measured on the device:
  * line (172,180,244), empty-cell dot (58,62,85), '#' button (64,70,104),
- * moving arrow highlight (111..131,130..147,250), blocked arrow / hearts red (255,75,93).
+ * moving arrow highlight (111..131,130..147,250), blocked arrow / hearts red (255,75,93),
+ * hint arrow: a gradient from orange (255,195,95) at the head through red to pink (255,89,156) at the tail.
  */
 class Shot(val w: Int, val h: Int, px: IntArray, lineColorIn: Int?) {
     val top = (BAND_TOP * h).toInt()
@@ -27,8 +28,18 @@ class Shot(val w: Int, val h: Int, px: IntArray, lineColorIn: Int?) {
     val dot = BooleanArray(w * h)
     /** Red = an arrow tapped while blocked; it waits and leaves by itself once its way is clear. */
     val red = BooleanArray(w * h)
+    /** Orange / pink: the hint arrow's gradient, or an arrow leaving in a combo colour. */
+    val warm = BooleanArray(w * h)
+    /**
+     * Bright, but not an arrow line: an arrow sliding out (blue, or a combo colour such as orange) or the hint
+     * highlight drawn over an arrow. The cells under it tell nothing.
+     */
+    val busy = BooleanArray(w * h)
+    var oddPx = 0; private set
     var busyPx = 0; private set
     var heartPx = 0; private set
+    /** True when one of our overlays covers the hearts in this frame: don't judge lives from it. */
+    var heartsHidden = false
     /** Pixels of the '#' grid-view guide lines (56,64,95) inside the band. */
     var guidePx = 0; private set
     /** Centre of the '#' button (bottom right), or -1. */
@@ -52,9 +63,15 @@ class Shot(val w: Int, val h: Int, px: IntArray, lineColorIn: Int?) {
                 val c = px[o + x]
                 val r = (c shr 16) and 255; val g = (c shr 8) and 255; val b = c and 255
                 val red = r > 200 && g < 130 && b < 140
+                val hint = r > 200 && ((g >= 130 && b < 130) || (b >= 140 && g < 130))
                 val isLine = inBand && ((abs(r - lr) < 40 && abs(g - lg) < 40 && abs(b - lb) < 35) || red)
                 line[o + x] = isLine
                 this.red[o + x] = inBand && red
+                warm[o + x] = inBand && hint
+                // anti-aliased line edges are blends of line and background colour: not odd
+                if (inBand && !isLine && r + g + b > 300 && offBlend(r, g, b, lr, lg, lb) && offBlend(r, g, b, 255, 75, 93)) {
+                    busy[o + x] = true; oddPx++
+                }
                 dot[o + x] = abs(r - 58) < 8 && abs(g - 62) < 6 && abs(b - 85) < 6
                 if (inBand && abs(r - 56) < 5 && abs(g - 64) < 5 && abs(b - 95) < 5) guidePx++
                 val ui = abs(r - 66) < 8 && abs(g - 71) < 9 && abs(b - 104) < 9
@@ -88,6 +105,15 @@ class Shot(val w: Int, val h: Int, px: IntArray, lineColorIn: Int?) {
     }
 
     companion object {
+        /** Farther than 30 from every mix of the background (30,32,45) with colour (cr,cg,cb)? */
+        fun offBlend(r: Int, g: Int, b: Int, cr: Int, cg: Int, cb: Int): Boolean {
+            val vr = cr - 30; val vg = cg - 32; val vb = cb - 45
+            val ur = r - 30; val ug = g - 32; val ub = b - 45
+            val t = ((ur * vr + ug * vg + ub * vb).toDouble() / (vr * vr + vg * vg + vb * vb)).coerceIn(0.0, 1.0)
+            val dr = ur - t * vr; val dg = ug - t * vg; val db = ub - t * vb
+            return dr * dr + dg * dg + db * db > 30.0 * 30.0
+        }
+
         /** Most common bright colour in the band that is far from the background. */
         fun detectLineColor(w: Int, h: Int, px: IntArray, top: Int, bottom: Int): Int {
             val cnt = IntArray(4096); val sr = LongArray(4096); val sg = LongArray(4096); val sb = LongArray(4096)
@@ -106,7 +132,7 @@ class Shot(val w: Int, val h: Int, px: IntArray, lineColorIn: Int?) {
                 val (r, g, b) = mean(k)
                 val d2 = (r - br) * (r - br) + (g - bgG) * (g - bgG) + (b - bb) * (b - bb)
                 if (d2 < 100 * 100 || r + g + b < br + bgG + bb + 200) continue
-                if (r > 200 && g < 130) continue // red blocked arrow
+                if (r > 200) continue // red blocked arrow, hint arrow
                 if (best < 0 || cnt[k] > cnt[best]) best = k
             }
             if (best < 0) return DEFAULT_LINE
@@ -242,9 +268,18 @@ object Parser {
         val jLo = ceil((s.top - lat.ay) / lat.q).toInt(); val jHi = floor((s.bottom - lat.ay) / lat.q).toInt()
         val nb = max(2, (0.075 * p).roundToInt())
         val db = max(3, (0.12 * p).roundToInt())
+        val br = max(3, (0.35 * p).roundToInt())
+        val hr = (2 * p).roundToInt()
+        fun any(a: BooleanArray, x: Int, y: Int, r: Int, n: Int): Boolean {
+            var c = 0
+            for (yy in max(0, y - r)..min(s.h - 1, y + r)) for (xx in max(0, x - r)..min(s.w - 1, x + r)) if (a[yy * s.w + xx] && ++c >= n) return true
+            return false
+        }
         for (i in iLo..iHi) for (j in jLo..jHi) {
             val x = lat.px(i); val y = lat.py(j)
             if (!visible(x, y)) continue
+            // a sliding arrow covers this node: unknown until it has gone
+            if (s.oddPx > 0 && any(s.busy, x, y, br, 3)) continue
             val k = Cell(i, j)
             val q = quality(x, y)
             v.node[k] = Obs(s.lineCount(x - nb, y - nb, x + nb, y + nb) > 0, q)
@@ -253,7 +288,8 @@ object Parser {
             v.dot[k] = dots >= 5
             var reds = 0
             for (yy in y - nb..y + nb) for (xx in x - nb..x + nb) if (xx in 0 until s.w && yy in 0 until s.h && s.red[yy * s.w + xx]) reds++
-            v.red[k] = reds >= 4
+            // the hint's gradient passes through red: red next to its orange/pink parts is the hint, not a waiting arrow
+            v.red[k] = reds >= 4 && !any(s.warm, x, y, hr, 20)
             if (nodesOnly) continue
             // edges to the right / below: lavender across the middle of the gap?
             val t0 = (0.33 * p).roundToInt(); val t1 = (0.68 * p).roundToInt(); val hb = max(2, (0.1 * p).roundToInt())

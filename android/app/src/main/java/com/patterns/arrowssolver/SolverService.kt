@@ -45,6 +45,8 @@ class SolverService : AccessibilityService(), Device {
 
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
+    /** Keeps the green/yellow drawing glued to the real arrows between runs (re-measured ~3 times a second). */
+    private val tracker = Executors.newSingleThreadScheduledExecutor()
     private val running = AtomicBoolean(false)
     @Volatile private var stop = false
     override val stopRequested get() = stop
@@ -67,7 +69,13 @@ class SolverService : AccessibilityService(), Device {
     override fun onServiceConnected() {
         instance = this
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        main.post { buildUi(); refresh() }
+        main.post { buildUi(); syncForeground(); refresh() }
+        tracker.scheduleWithFixedDelay({ trackTick() }, 1500, 300, TimeUnit.MILLISECONDS)
+        // The lock screen is system UI, which onAccessibilityEvent ignores: watch the screen state directly.
+        val f = android.content.IntentFilter().apply {
+            addAction(android.content.Intent.ACTION_SCREEN_OFF); addAction(android.content.Intent.ACTION_USER_PRESENT); addAction(android.content.Intent.ACTION_SCREEN_ON)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenReceiver, f, RECEIVER_NOT_EXPORTED) else registerReceiver(screenReceiver, f)
     }
 
     override fun onAccessibilityEvent(e: AccessibilityEvent?) {
@@ -88,11 +96,23 @@ class SolverService : AccessibilityService(), Device {
 
     override fun onInterrupt() {}
 
+    private val screenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, i: android.content.Intent) {
+            if (i.action == android.content.Intent.ACTION_SCREEN_OFF && running.get()) { stop = true; status("Stopped: screen turned off") }
+            main.post { refresh() }
+            // unlocking can flash the launcher and return to the game without a window event: ask who is in front
+            // (the lock screen / shade can still be the active window at first, so ask again a little later)
+            if (i.action != android.content.Intent.ACTION_SCREEN_OFF) for (ms in longArrayOf(700, 1500, 3000)) main.postDelayed({ syncForeground(); refresh() }, ms)
+        }
+    }
+
     override fun onDestroy() {
+        runCatching { unregisterReceiver(screenReceiver) }
         stop = true
         instance = null
         listOfNotNull(bubble, panel, planView, mapView).forEach { runCatching { wm.removeView(it) } }
         worker.shutdownNow()
+        tracker.shutdownNow()
         super.onDestroy()
     }
 
@@ -129,12 +149,11 @@ class SolverService : AccessibilityService(), Device {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun buildUi() {
-        val screenH = resources.displayMetrics.heightPixels
         planView = PlanView(this).also { wm.addView(it, overlayLp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, false)) }
         mapView = MapView(this).also { wm.addView(it, overlayLp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, false)) }
 
         val size = dp(52)
-        bubbleLp = overlayLp(size, size, true).apply { x = dp(8); y = (screenH * 0.03).toInt() }
+        bubbleLp = overlayLp(size, size, true).apply { val a = safeArea(); x = a.left + dp(8); y = a.top + dp(4) }
         bubble = BubbleView(this).apply {
             contentDescription = "Arrows Solver"
             var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var dragged = false
@@ -146,11 +165,13 @@ class SolverService : AccessibilityService(), Device {
                         val dx = ev.rawX - downX; val dy = ev.rawY - downY
                         if (dragged || abs(dx) + abs(dy) > dp(8)) {
                             dragged = true
-                            lp.x = startX + dx.toInt(); lp.y = startY + dy.toInt()
+                            val a = safeArea()
+                            lp.x = (startX + dx.toInt()).coerceIn(a.left, a.right - size)
+                            lp.y = (startY + dy.toInt()).coerceIn(a.top, a.bottom - size)
                             wm.updateViewLayout(this, lp); placePanel()
                         }
                     }
-                    MotionEvent.ACTION_UP -> if (!dragged) { panelOpen = !panelOpen; refresh() }
+                    MotionEvent.ACTION_UP -> if (!dragged) { panelOpen = !panelOpen; refresh(); placePanel() }
                 }
                 true
             }
@@ -166,7 +187,7 @@ class SolverService : AccessibilityService(), Device {
         }
         val row1 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(chip("Analyze", Ui.RAISED) { launch { engine.analyze() } })
+            addView(chip("Analyze", Ui.RAISED) { panelOpen = false; refresh(); launch { engine.analyze() } })
             addView(chip("Solve", Ui.ACCENT, Color.WHITE) { panelOpen = false; refresh(); launch { engine.solve() } })
             addView(chip("Stop", Ui.RAISED, Ui.RED) { stop = true; status("Stopping…") })
         }
@@ -193,24 +214,56 @@ class SolverService : AccessibilityService(), Device {
         placePanel()
     }
 
+    /** Screen area not covered by status bar, navigation bar or camera cutout (overlays may draw anywhere). */
+    private fun safeArea(): Rect {
+        val m = wm.currentWindowMetrics
+        val i = m.windowInsets.getInsetsIgnoringVisibility(
+            android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout(),
+        )
+        return Rect(i.left, i.top, m.bounds.width() - i.right, m.bounds.height() - i.bottom)
+    }
+
+    /** Panel under the bubble, or above it when there is no room below; never off screen. */
     private fun placePanel() {
         val lp = panelLp ?: return; val b = bubbleLp ?: return
-        lp.x = b.x; lp.y = b.y + dp(60)
+        val a = safeArea()
+        val ph = panel?.height?.takeIf { it > 0 } ?: dp(170)
+        lp.x = b.x.coerceIn(a.left, maxOf(a.left, a.right - lp.width))
+        val below = b.y + b.height + dp(8)
+        lp.y = if (below + ph <= a.bottom) below else maxOf(a.top, b.y - ph - dp(8))
         panel?.let { wm.updateViewLayout(it, lp) }
     }
 
+    /** Set [inGame] from the app actually in front (events alone miss some switches, e.g. after unlock). */
+    private fun syncForeground() {
+        val pkg = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull() ?: return
+        if (pkg !in IGNORE) inGame = pkg == GAME
+    }
+
     private fun refresh() {
-        bubble?.visibility = if (inGame) View.VISIBLE else View.GONE
-        panel?.visibility = if (inGame && panelOpen) View.VISIBLE else View.GONE
-        planView?.visibility = if (inGame && planShown && planView?.drawing != null) View.VISIBLE else View.GONE
-        mapView?.visibility = if (inGame && mapShown && mapView?.drawing != null) View.VISIBLE else View.GONE
+        // accessibility overlays also draw over the lock screen: show nothing while the phone is locked
+        val show = inGame && !getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
+        bubble?.visibility = if (show) View.VISIBLE else View.GONE
+        panel?.visibility = if (show && panelOpen) View.VISIBLE else View.GONE
+        planView?.visibility = if (show && planShown && planView?.drawing != null) View.VISIBLE else View.GONE
+        mapView?.visibility = if (show && mapShown && mapView?.drawing != null) View.VISIBLE else View.GONE
+    }
+
+    private fun trackTick() {
+        // only between runs, in the game, with the drawing switched on, and only with game-window screenshots
+        // (full-screen shots would see our own drawing)
+        if (!inGame || running.get() || !planShown || engine.board == null || !overlaysHiddenFromCapture) return
+        val d = runCatching { engine.trackOnce() }.getOrNull()
+        main.post { planView?.drawing = d; planView?.invalidate(); refresh() }
     }
 
     private fun launch(task: () -> Unit) {
         if (!running.compareAndSet(false, true)) { status("Busy — tap Stop first"); return }
         stop = false
+        (bubble as? BubbleView)?.busy = true
         worker.execute {
-            try { task() } catch (t: Throwable) { status("⚠ Error: ${t.javaClass.simpleName}: ${t.message}") } finally { running.set(false) }
+            try { task() } catch (t: Throwable) { status("⚠ Error: ${t.javaClass.simpleName}: ${t.message}") }
+            finally { engine.resetTracking(); running.set(false); main.post { (bubble as? BubbleView)?.busy = false } }
         }
     }
 
@@ -234,7 +287,8 @@ class SolverService : AccessibilityService(), Device {
     }
 
     override fun showPlan(d: PlanDrawing?) {
-        main.post { planView?.drawing = d; planView?.invalidate(); refresh() }
+        onMain { planView?.drawing = d; planView?.invalidate(); refresh() }
+        if (d == null && Looper.myLooper() != Looper.getMainLooper()) Thread.sleep(100) // let it leave the screen before the next screenshot
     }
 
     private var debugN = 0
@@ -258,14 +312,67 @@ class SolverService : AccessibilityService(), Device {
                 val loc = IntArray(2); v.getLocationOnScreen(loc)
                 out.add(Rect(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height))
             }
+            mapView?.takeIf { it.visibility == View.VISIBLE }?.box?.let { out.add(Rect(it)) }
         }
         return out
     }
 
-    override fun capture(lineColor: Int?): Shot? {
-        onMain { listOfNotNull(bubble, panel, planView, mapView).forEach { it.alpha = 0f } }
-        try {
-            Thread.sleep(150) // let the hidden overlays leave the screen
+    /** null = not tried yet, true = window-only screenshots work, false = use full-screen shots. */
+    @Volatile private var windowShots: Boolean? = null
+    override val overlaysHiddenFromCapture get() = windowShots == true
+
+    /** Android 14+: screenshot only the game's window, so our bubble, panel and drawings never appear in it. */
+    private fun captureGameWindow(lineColor: Int?): Shot? {
+        if (android.os.Build.VERSION.SDK_INT < 34 || windowShots == false) return null
+        val root = runCatching { rootInActiveWindow }.getOrNull()
+        val win = root?.takeIf { it.packageName?.toString() == GAME }?.windowId
+            ?: runCatching { windows.firstOrNull { w -> w.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && w.root?.packageName?.toString() == GAME }?.id }.getOrNull()
+        if (win == null) {
+            if (windowShots == null) debug("window-only screenshots: no game window (active root=${root?.packageName}, windows=${runCatching { windows.size }.getOrNull()})")
+            return null
+        }
+        val latch = CountDownLatch(1)
+        var bmp: Bitmap? = null
+        takeScreenshotOfWindow(win, mainExecutor, object : TakeScreenshotCallback {
+            override fun onSuccess(r: ScreenshotResult) {
+                try {
+                    val hw = Bitmap.wrapHardwareBuffer(r.hardwareBuffer, r.colorSpace)
+                    bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                    hw?.recycle()
+                } finally { r.hardwareBuffer.close(); latch.countDown() }
+            }
+            override fun onFailure(errorCode: Int) { latch.countDown() }
+        })
+        latch.await(5, TimeUnit.SECONDS)
+        val b = bmp ?: return null
+        val full = wm.currentWindowMetrics.bounds
+        val px = IntArray(b.width * b.height)
+        b.getPixels(px, 0, b.width, 0, 0, b.width, b.height)
+        // must cover the whole display and really contain the game (Unity draws into a SurfaceView)
+        var lit = 0; var n = 0
+        for (i in px.indices step 997) { n++; if (((px[i] shr 16 and 255) + (px[i] shr 8 and 255) + (px[i] and 255)) > 60) lit++ }
+        val ok = b.width == full.width() && b.height == full.height() && lit > n / 2
+        if (windowShots == null) { windowShots = ok; debug("window-only screenshots: $ok (${b.width}x${b.height}, lit $lit/$n)") }
+        if (!ok) { b.recycle(); return null }
+        runCatching { java.io.File(debugDir, "f%03d.png".format(debugN++)).outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) } }
+        b.recycle()
+        return Shot(full.width(), full.height(), px, lineColor)
+    }
+
+    private val captureLock = Any()
+
+    override fun capture(lineColor: Int?): Shot? = synchronized(captureLock) {
+        captureGameWindow(lineColor)?.let { return it }
+        // Window shots work on this phone, so a failure is the screenshot rate limit (the overlay tracker may have
+        // just taken one): wait and retry. A full-screen shot would contain our own drawing, over the hearts too.
+        if (windowShots == true) {
+            repeat(4) { Thread.sleep(350); captureGameWindow(lineColor)?.let { return it } }
+            return null
+        }
+        // Fallback: whole screen. Overlays stay visible (hiding them made the screen blink); their areas are painted as
+        // plain background in the screenshot, and the parser and the tap picker skip these rects.
+        val covered = overlayRects().map { Rect(it.left - 6, it.top - 6, it.right + 6, it.bottom + 6) }
+        run {
             repeat(5) {
                 val latch = CountDownLatch(1)
                 var bmp: Bitmap? = null
@@ -284,7 +391,11 @@ class SolverService : AccessibilityService(), Device {
                 if (b != null) {
                     val px = IntArray(b.width * b.height)
                     b.getPixels(px, 0, b.width, 0, 0, b.width, b.height)
+                    for (r in covered) for (y in maxOf(0, r.top) until minOf(b.height, r.bottom)) {
+                        java.util.Arrays.fill(px, y * b.width + maxOf(0, r.left), y * b.width + minOf(b.width, r.right), Ui.BG)
+                    }
                     val shot = Shot(b.width, b.height, px, lineColor)
+                    shot.heartsHidden = covered.any { it.intersects((0.33 * b.width).toInt(), (0.085 * b.height).toInt(), (0.67 * b.width).toInt(), (0.135 * b.height).toInt()) }
                     runCatching {
                         java.io.File(debugDir, "f%03d.png".format(debugN++)).outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     }
@@ -294,8 +405,6 @@ class SolverService : AccessibilityService(), Device {
                 Thread.sleep(400) // screenshots are rate-limited (~3/s)
             }
             return null
-        } finally {
-            onMain { listOfNotNull(bubble, panel, planView, mapView).forEach { it.alpha = 1f } }
         }
     }
 
@@ -334,25 +443,50 @@ class SolverService : AccessibilityService(), Device {
 }
 
 /** Full-screen, touch-through drawing of the analysed arrows (green = can go now). */
-class PlanView(ctx: Context) : View(ctx) {
+class PlanView(private val ctx: Context) : View(ctx) {
     var drawing: PlanDrawing? = null
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; strokeWidth = 9f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val sprite = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val loc = IntArray(2)
+    private val rect = android.graphics.RectF()
+
+    /** The game's own white sprites, extracted from the user's APK by tools/extract_levels.py (not in the repo). */
+    private val head: Bitmap? = runCatching { ctx.assets.open("game/ArrowHead.png").use { android.graphics.BitmapFactory.decodeStream(it) } }.getOrNull()
+    private val tail: Bitmap? = runCatching { ctx.assets.open("game/ArrowEnd.png").use { android.graphics.BitmapFactory.decodeStream(it) } }.getOrNull()
 
     override fun onDraw(c: Canvas) {
         val d = drawing ?: return
         getLocationOnScreen(loc)
         c.translate(-loc[0].toFloat(), -loc[1].toFloat())
+        // Same geometry as the game (ArrowView): body ~0.2 cell wide, ArrowHead sprite 256 px at 300 px/unit = 0.853 cell,
+        // centred on the head cell, ArrowEnd circle as the tail cap. Drawn a touch larger and opaque to fully cover the
+        // game's lavender arrow, so it looks recoloured.
+        val p = d.pitch
+        stroke.strokeWidth = 0.25f * p
+        stroke.pathEffect = android.graphics.CornerPathEffect(0.2f * p)
         for ((pts, color) in d.paths) {
-            if (pts.size < 2) continue
-            stroke.color = color; stroke.alpha = 190
-            val p = Path().apply { moveTo(pts[0], pts[1]); for (i in 2 until pts.size step 2) lineTo(pts[i], pts[i + 1]) }
-            c.drawPath(p, stroke)
-            fill.color = color
-            c.drawCircle(pts[pts.size - 2], pts[pts.size - 1], 13f, fill)
+            if (pts.size < 4) continue
+            stroke.color = color; fill.color = color
+            sprite.colorFilter = android.graphics.PorterDuffColorFilter(color, android.graphics.PorterDuff.Mode.SRC_IN)
+            val n = pts.size
+            c.drawPath(Path().apply { moveTo(pts[0], pts[1]); for (i in 2 until n step 2) lineTo(pts[i], pts[i + 1]) }, stroke)
+            val tr = 0.13f * p
+            val t = tail
+            if (t != null) { rect.set(pts[0] - tr, pts[1] - tr, pts[0] + tr, pts[1] + tr); c.drawBitmap(t, null, rect, sprite) }
+            val hx = pts[n - 2]; val hy = pts[n - 1]
+            val deg = Math.toDegrees(kotlin.math.atan2((hx - pts[n - 4]).toDouble(), -(hy - pts[n - 3]).toDouble())).toFloat()
+            val h = head
+            val half = 0.46f * p
+            c.save(); c.rotate(deg, hx, hy)
+            if (h != null) {
+                rect.set(hx - half, hy - half, hx + half, hy + half); c.drawBitmap(h, null, rect, sprite)
+            } else { // no extracted sprite: a plain triangle in the same place
+                c.drawPath(Path().apply { moveTo(hx, hy - 0.38f * p); lineTo(hx - 0.32f * p, hy + 0.26f * p); lineTo(hx + 0.32f * p, hy + 0.26f * p); close() }, fill)
+            }
+            c.restore()
         }
     }
 }
@@ -360,6 +494,9 @@ class PlanView(ctx: Context) : View(ctx) {
 /** Whole-level mini-map in the lower part of the screen (touch-through). */
 class MapView(ctx: Context) : View(ctx) {
     var drawing: MapDrawing? = null
+    /** Last drawn panel area in screen coordinates (excluded from screenshots). */
+    @Volatile var box: Rect? = null
+    private val loc = IntArray(2)
     private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = (Ui.CARD and 0x00FFFFFF) or 0xF2000000.toInt() }
     private val frame = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f; color = Ui.RAISED }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
@@ -373,6 +510,8 @@ class MapView(ctx: Context) : View(ctx) {
         val cell = minOf(boxW / (d.w + 1), boxH / (d.h + 1))
         val w = cell * (d.w + 1); val h = cell * (d.h + 1)
         val left = (width - w) / 2; val top = height - h - height * 0.06f
+        getLocationOnScreen(loc)
+        box = Rect((left - 16).toInt() + loc[0], (top - 16).toInt() + loc[1], (left + w + 16).toInt() + loc[0], (top + h + 16).toInt() + loc[1])
         c.drawRoundRect(left - 16, top - 16, left + w + 16, top + h + 16, 44f, 44f, bg)
         c.drawRoundRect(left - 16, top - 16, left + w + 16, top + h + 16, 44f, 44f, frame)
         stroke.strokeWidth = maxOf(2f, cell * 0.28f)
@@ -409,23 +548,116 @@ object Ui {
         .getOrDefault(android.graphics.Typeface.DEFAULT_BOLD).also { semi = it }
 }
 
-/** Round accent button with an arrow drawn the way the game draws its arrows (rounded line + solid head). */
+/**
+ * The floating button, styled after Apple's Liquid Glass (regular variant): a frosted body that dims what is behind
+ * it so the glyph stays legible, light pooling at the lower edge (depth), a brighter lens band just inside the edge
+ * (refraction), a specular rim brightest top-left with an echo bottom-right, a small glint and a soft shadow.
+ * Overlay windows can't sample or blur the screen behind them, so every layer is painted.
+ * While Analyze/Solve runs it shows a spinner instead of the icon: a faint ring plus a quarter arc, one turn a second.
+ */
 class BubbleView(ctx: Context) : View(ctx) {
-    private val disc = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Ui.ACCENT }
-    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = 0x55FFFFFF }
-    private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Color.WHITE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-    private val head = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
+    var busy = false
+        set(v) {
+            field = v
+            // respect "Remove animations": the spinner then stays still
+            still = android.provider.Settings.Global.getFloat(context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+            invalidate()
+        }
+    private var still = false
+    private val dp = resources.displayMetrics.density
+    private val shadow = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val body = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val lens = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sheen = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val rim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.3f * dp }
+    private val glint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 1.5f * dp; strokeCap = Paint.Cap.ROUND; color = 0xCCFFFFFF.toInt()
+    }
+    // the requested icon: a rounded square at 50% and a navigation arrow, 1.5 wide strokes on a 24 unit grid
+    private val frame = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; color = 0x80FFFFFF.toInt(); strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+    }
+    private val nav = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; color = Color.WHITE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        setShadowLayer(1.5f * dp, 0f, 0.75f * dp, 0x59000000)
+    }
+    private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = 0x80FFFFFF.toInt() }
+    private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; color = Color.WHITE }
+    private val oval = android.graphics.RectF()
+    private val framePath = Path()
+    private val navPath = Path()
+    private var cx = 0f
+    private var cy = 0f
+    private var r = 0f
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        val clamp = android.graphics.Shader.TileMode.CLAMP
+        cx = w / 2f; cy = h / 2f
+        val outer = minOf(cx, cy)
+        r = outer - 3f * dp // padding: room for the shadow, so the glass reads as a layer floating above the game
+        shadow.shader = android.graphics.RadialGradient(cx, cy + dp, outer, intArrayOf(0x59000000, 0x2E000000, 0), floatArrayOf(0.7f, r / outer, 1f), clamp)
+        body.shader = android.graphics.LinearGradient(0f, cy - r, 0f, cy + r, 0xCC4A5180.toInt(), 0xCC262A40.toInt(), clamp)
+        glow.shader = android.graphics.RadialGradient(cx, cy + r * 0.9f, r * 1.1f, 0x705B71FF, 0x005B71FF, clamp)
+        lens.shader = android.graphics.RadialGradient(cx, cy, r, intArrayOf(0, 0, 0x2EFFFFFF, 0x0AFFFFFF), floatArrayOf(0f, 0.72f, 0.93f, 1f), clamp)
+        sheen.shader = android.graphics.LinearGradient(0f, cy - r * 0.92f, 0f, cy - r * 0.1f, 0x38FFFFFF, 0x00FFFFFF, clamp)
+        // SweepGradient: 0 = 3 o'clock, clockwise. Brightest at top-left (0.625), echo at bottom-right (0.125).
+        rim.shader = android.graphics.SweepGradient(
+            cx, cy,
+            intArrayOf(0x55FFFFFF, 0x99FFFFFF.toInt(), 0x22FFFFFF, 0xF2FFFFFF.toInt(), 0x22FFFFFF, 0x55FFFFFF),
+            floatArrayOf(0f, 0.125f, 0.375f, 0.625f, 0.875f, 1f),
+        )
+        // icon on the spinner's 24 unit grid (its ring is r=9 units = 0.42r), so both are the same size
+        val u = r * 0.42f / 9f
+        frame.strokeWidth = 1.5f * u; nav.strokeWidth = 1.5f * u
+        framePath.rewind()
+        framePath.moveTo(12f, 22f)
+        framePath.cubicTo(7.28595f, 22f, 4.92893f, 22f, 3.46447f, 20.5355f)
+        framePath.cubicTo(2f, 19.0711f, 2f, 16.714f, 2f, 12f)
+        framePath.cubicTo(2f, 7.28595f, 2f, 4.92893f, 3.46447f, 3.46447f)
+        framePath.cubicTo(4.92893f, 2f, 7.28595f, 2f, 12f, 2f)
+        framePath.cubicTo(16.714f, 2f, 19.0711f, 2f, 20.5355f, 3.46447f)
+        framePath.cubicTo(22f, 4.92893f, 22f, 7.28595f, 22f, 12f)
+        framePath.cubicTo(22f, 16.714f, 22f, 19.0711f, 20.5355f, 20.5355f)
+        framePath.cubicTo(19.0711f, 22f, 16.714f, 22f, 12f, 22f)
+        framePath.close()
+        navPath.rewind()
+        navPath.moveTo(13.4227f, 17.3618f)
+        navPath.lineTo(16.9348f, 8.19598f)
+        navPath.cubicTo(17.2164f, 7.46107f, 16.5389f, 6.78361f, 15.804f, 7.06521f)
+        navPath.lineTo(6.63824f, 10.5773f)
+        navPath.cubicTo(5.80779f, 10.8955f, 5.78079f, 12.06f, 6.5981f, 12.3083f)
+        navPath.lineTo(10.0751f, 13.3648f)
+        navPath.cubicTo(10.3455f, 13.447f, 10.553f, 13.6545f, 10.6352f, 13.9249f)
+        navPath.lineTo(11.6917f, 17.4019f)
+        navPath.cubicTo(11.94f, 18.2192f, 13.1045f, 18.1922f, 13.4227f, 17.3618f)
+        navPath.close()
+        val m = android.graphics.Matrix().apply { setScale(u, u); postTranslate(cx - 12f * u, cy - 12f * u) }
+        framePath.transform(m); navPath.transform(m)
+    }
 
     override fun onDraw(c: Canvas) {
-        val w = width.toFloat(); val r = w / 2
-        ring.strokeWidth = w * 0.04f
-        c.drawCircle(r, r, r - ring.strokeWidth, disc)
-        c.drawCircle(r, r, r - ring.strokeWidth, ring)
-        line.strokeWidth = w * 0.085f
-        // an L-shaped arrow, like the game's pieces, pointing up-right
-        val p = Path().apply { moveTo(w * 0.32f, w * 0.70f); lineTo(w * 0.32f, w * 0.50f); lineTo(w * 0.60f, w * 0.50f); lineTo(w * 0.60f, w * 0.40f) }
-        c.drawPath(p, line)
-        val h = Path().apply { moveTo(w * 0.60f, w * 0.24f); lineTo(w * 0.72f, w * 0.42f); lineTo(w * 0.48f, w * 0.42f); close() }
-        c.drawPath(h, head)
+        c.drawCircle(cx, cy, minOf(cx, cy), shadow)
+        c.drawCircle(cx, cy, r, body)
+        c.drawCircle(cx, cy, r, glow)
+        c.drawCircle(cx, cy, r, lens)
+        c.drawOval(cx - r * 0.62f, cy - r * 0.92f, cx + r * 0.62f, cy - r * 0.1f, sheen)
+        c.drawCircle(cx, cy, r - rim.strokeWidth / 2, rim)
+        val gr = r - 3f * dp
+        oval.set(cx - gr, cy - gr, cx + gr, cy + gr)
+        c.drawArc(oval, 205f, 30f, false, glint)
+        if (busy) {
+            // the requested SVG spinner (ring r=9, 2 thick, at 50% + a 90 degree arc), scaled to sit well inside the glass
+            val sr = r * 0.42f
+            track.strokeWidth = sr * 2f / 9f; arc.strokeWidth = track.strokeWidth
+            oval.set(cx - sr, cy - sr, cx + sr, cy + sr)
+            c.drawCircle(cx, cy, sr, track)
+            val turn = if (still) 0f else (android.os.SystemClock.uptimeMillis() % 1000L) / 1000f * 360f
+            c.drawArc(oval, -90f + turn, 90f, false, arc)
+            if (!still) postInvalidateOnAnimation()
+            return
+        }
+        c.drawPath(framePath, frame)
+        c.drawPath(navPath, nav)
     }
 }

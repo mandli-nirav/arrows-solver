@@ -93,7 +93,7 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+      <StatusBar barStyle="light-content" />
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={s.content}>
           <Text style={s.title}>

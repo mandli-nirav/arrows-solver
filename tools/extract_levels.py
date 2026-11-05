@@ -12,6 +12,9 @@ Pull the APK that is installed on your phone and convert it locally:
 
 Without levels.bin the app still works, but only through the slower screen-reading fallback.
 
+It also copies the game's own arrow sprites (ArrowHead, ArrowEnd) into android/app/src/main/assets/game/ so the
+overlay can draw arrows exactly like the game. These files are the developer's art: they stay local (gitignored).
+
 levels.bin format (big-endian):
     "ARW1"  u32 level_count
     per level: u8 mode (0 main, 1 daily, 2 thunder rush), u16 name_len, name (UTF-8),
@@ -65,6 +68,27 @@ def read_levels(apk_path):
     return levels
 
 
+def export_sprites(apk_path, out_dir, names=('ArrowHead', 'ArrowEnd')):
+    """Save the game's white arrow sprites as PNG (the overlay tints them)."""
+    import tempfile
+    import UnityPy
+    with zipfile.ZipFile(apk_path) as z, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:  # UnityPy keeps files open on Windows
+        data = [n for n in z.namelist() if n.startswith('assets/bin/Data/') and '/Managed/' not in n]
+        for n in data:
+            z.extract(n, tmp)
+        env = UnityPy.load(os.path.join(tmp, 'assets', 'bin', 'Data'))
+        os.makedirs(out_dir, exist_ok=True)
+        found = set()
+        for obj in env.objects:
+            if obj.type.name != 'Sprite':
+                continue
+            sprite = obj.read()
+            if sprite.m_Name in names and sprite.m_Name not in found:
+                sprite.image.save(os.path.join(out_dir, sprite.m_Name + '.png'))
+                found.add(sprite.m_Name)
+        print('sprites:', ', '.join(sorted(found)) or 'none found')
+
+
 def pack(levels):
     out = bytearray(b'ARW1') + struct.pack('>I', len(levels))
     for mode, name, w, h, flags, special, arrows in levels:
@@ -89,6 +113,7 @@ def main():
     with open(args.out, 'wb') as f:
         f.write(data)
     print(f'wrote {args.out} ({len(data):,} bytes)')
+    export_sprites(args.apk, os.path.join(os.path.dirname(os.path.abspath(args.out)), 'game'))
 
 
 if __name__ == '__main__':

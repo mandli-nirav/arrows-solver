@@ -19,6 +19,8 @@ interface Device {
     fun overlayRects(): List<Rect>
     fun status(msg: String)
     fun showPlan(d: PlanDrawing?)
+    /** True when screenshots contain only the game window, so our overlays can stay visible while solving. */
+    val overlaysHiddenFromCapture: Boolean
     /** Whole-level mini-map drawn by the app (the game can't zoom out far enough for wide boards). */
     fun showMap(d: MapDrawing?)
     /** Debug trail: frames + numbers saved on the phone (Android/data/<pkg>/files/debug). */
@@ -26,7 +28,8 @@ interface Device {
     fun debug(msg: String)
 }
 
-class PlanDrawing(val paths: List<Pair<FloatArray, Int>>)
+/** Arrows in screen pixels (tail..head polylines) with colours, drawn over the game's own arrows; [pitch] = cell size. */
+class PlanDrawing(val paths: List<Pair<FloatArray, Int>>, val pitch: Float)
 
 /** Board-space drawing of the whole level: w x h cells, polylines in cell units with colours. */
 class MapDrawing(val w: Int, val h: Int, val paths: List<Pair<FloatArray, Int>>)
@@ -50,6 +53,9 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     private val dontCare = HashSet<Cell>()
     /** Every cell any arrow of the matched level ever covered (null when the board was read from screen only). */
     private var everCells: Set<Cell>? = null
+    /** When each arrow was tapped; the emptied-cell dots fade in a moment after an arrow has left. */
+    private val tappedAt = HashMap<Int, Long>()
+    private var freshCells: Set<Cell> = emptySet()
     /** Solve starts with this wide a board search (set when analysis could not track the camera to the end). */
     private var startWide = 0
     /** Red arrows: tapped while blocked earlier; they leave on their own once free, never tap them. */
@@ -65,7 +71,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     private class Cam(var shot: Shot, var l: Lattice, var ci: Int, var cj: Int)
 
     fun analyze(attempt: Int = 0): Boolean {
-        board = null; everCells = null; removed.clear(); dontCare.clear(); pending.clear(); unreachable.clear(); prePan = null; dev.showPlan(null); dev.debugBegin()
+        board = null; everCells = null; tappedAt.clear(); freshCells = emptySet(); removed.clear(); dontCare.clear(); pending.clear(); unreachable.clear(); prePan = null; dev.showPlan(null); dev.debugBegin()
         dev.status("Reading the screen\u2026")
         var (s0, l0) = settle() ?: return false
         // Big boards start zoomed in: zoom out as far as the game allows so fewer pans are needed.
@@ -80,7 +86,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             s0 = r.first; l0 = r.second
         }
         lineColor = s0.lineColor
-        heartBase = s0.heartPx
+        heartBase = if (s0.heartsHidden) 0 else s0.heartPx
         dev.debug("start lattice=$l0 line=${Integer.toHexString(s0.lineColor)} hearts=${s0.heartPx}")
         val sv = Survey(l0.p)
         sv.add(Parser.parse(s0, l0, dev.overlayRects()), 0, 0)
@@ -228,23 +234,31 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     fun solve(): Boolean {
         if (board == null && !analyze()) return false
         val b = board!!
-        dev.showPlan(null)
+        if (!dev.overlaysHiddenFromCapture) dev.showPlan(null)
         var retries = 0
         var wide = startWide // >0 after a pan: search a wider window when locating the board
         startWide = 0
         var reanalysed = false
-        var lastTap = -1
+        var lastTaps = emptyList<Int>()
+        var heartLow = 0
         while (true) {
             if (dev.stopRequested) return fail("Stopped (${removed.size}/${b.arrows.size} cleared)")
             val occ = b.occupancy(removed)
-            val s = dev.capture(lineColor) ?: return fail("Screenshot failed")
-            if (heartBase > 300 && s.heartPx < heartBase * 0.85) return fail("A heart was lost — stopped to protect the rest")
-            if (s.busyPx > 40) { sleep(250); continue } // an arrow is still sliding
-            if (s.guidePx > 3000) { if (!gridViewOff(s)) return false; continue }
             if (occ.isEmpty()) {
                 dev.status("Solved ✓ ${b.arrows.size} arrows cleared")
                 return true
             }
+            val s = dev.capture(lineColor) ?: return fail("Screenshot failed")
+            val now = System.currentTimeMillis()
+            freshCells = tappedAt.filterValues { now - it < 1500 }.keys.flatMapTo(HashSet()) { b.arrows[it].cells }
+            if (heartBase == 0 && !s.heartsHidden) heartBase = s.heartPx
+            if (!s.heartsHidden && heartBase > 300 && s.heartPx < heartBase * 0.85) {
+                // confirm on the next frame (no tap in between): one odd frame must not end the run
+                if (++heartLow >= 2) return fail("A heart was lost — stopped to protect the rest")
+                dev.debug("hearts look low (${s.heartPx}/$heartBase), checking again"); sleep(300); continue
+            }
+            heartLow = 0
+            if (s.guidePx > 3000) { if (!gridViewOff(s)) return false; continue }
             val cur = lat!!
             val nl = Grid.find(s, cur, useDots = true)
             val view = nl?.let { Parser.parse(s, it, dev.overlayRects(), nodesOnly = true) }
@@ -262,19 +276,29 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
                     val trial = HashSet(removed).apply { addAll(gone) }
                     val left = badAt(b, b.occupancy(trial), view, loc.di, loc.dj)
                     if (left == 0) { removed.addAll(gone); dev.debug("already cleared (seen now): $gone"); continue }
+                    // The game hands a touch to the nearest *free* arrow (ArrowInputUtils.GetClosestArrow), which can be
+                    // a free neighbour of the arrow we tapped: ours is still there and the neighbour is gone. Accept that
+                    // only if the screen then matches the model exactly.
+                    val seen = view.node.filter { it.value.v }.keys.mapTo(HashSet()) { Cell(it.c + loc.di, it.r + loc.dj) }
+                    val back = lastTaps.filter { id -> id !in gone && b.arrows[id].cells.any { it in seen } }.toSet()
+                    if (back.isNotEmpty() && badAt(b, b.occupancy(trial.apply { removeAll(back) }), view, loc.di, loc.dj) == 0) {
+                        removed.addAll(gone); removed.removeAll(back); lastTaps = emptyList()
+                        dev.debug("the game took $gone instead of $back"); continue
+                    }
                     dev.debug("not marking $gone as cleared: $left other differences remain")
                 }
             }
             if (nl == null || loc == null || loc.bad > 0) {
                 // The game ignores taps made while the camera still glides (InputUiView: isIgnoreClick = isCameraMoving).
                 // If the only difference is the arrow we just tapped, still sitting there unchanged, tap it again.
-                if (loc != null && view != null && lastTap >= 0 && retries >= 4) {
+                if (loc != null && view != null && lastTaps.isNotEmpty() && retries >= 2) {
                     val extra = view.node.filter { (k, o) -> o.v && Cell(k.c + loc.di, k.r + loc.dj) !in occ && Cell(k.c + loc.di, k.r + loc.dj) !in dontCare }
                         .keys.map { Cell(it.c + loc.di, it.r + loc.dj) }.toSet()
                     val missing = view.node.count { (k, o) -> !o.v && Cell(k.c + loc.di, k.r + loc.dj) in occ && Cell(k.c + loc.di, k.r + loc.dj) !in dontCare }
-                    if (extra.isNotEmpty() && missing == 0 && b.arrows[lastTap].cells.containsAll(extra)) {
-                        dev.debug("tap on arrow $lastTap was ignored by the game; trying it again")
-                        removed.remove(lastTap); lastTap = -1; retries = 0; continue
+                    val back = lastTaps.filter { id -> b.arrows[id].cells.any { it in extra } }
+                    if (extra.isNotEmpty() && missing == 0 && extra.all { c -> back.any { c in b.arrows[it].cells } }) {
+                        dev.debug("taps on $back were ignored by the game; trying again")
+                        removed.removeAll(back.toSet()); lastTaps = emptyList(); retries = 0; continue
                     }
                 }
                 if (loc != null && view != null && (retries == 0 || retries == 30)) {
@@ -312,6 +336,8 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             val moving = abs(nl.ax - cur.ax) > 1.0 || abs(nl.ay - cur.ay) > 1.0
             retries = 0; wide = 0
             lat = nl; di = loc.di; dj = loc.dj
+            // live colours over the game's arrows, only when our overlays can't confuse the screenshots
+            if (dev.overlaysHiddenFromCapture) dev.showPlan(drawing(b, nl, di, dj)) else dev.showPlan(null)
             if (moving) { sleep(250); continue }
             prePan?.let { if (it == Pair(di, dj) && panTarget >= 0) { unreachable.add(panTarget); dev.debug("drag didn't move the board; skipping arrow $panTarget for now") } }
             prePan = null
@@ -320,20 +346,35 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             if (autoGone.isNotEmpty()) { removed.addAll(autoGone); dev.debug("red arrows leaving by themselves: $autoGone"); continue }
             val free = b.free(removed).filter { it.id !in pending }
             if (free.isEmpty()) return fail("No arrow can move; the reading must be wrong")
-            val pick = chooseTap(b, free, occ, s, nl)
-            if (pick == null) {
+            // Up to 3 taps per checked frame. The game drops a tapped arrow from its grid at once, so the others stay
+            // free; after the first, only cells with no other arrow within 1.5 cells, so a slightly-off touch can't
+            // reach a neighbour.
+            val batch = ArrayList<Tap>()
+            while (batch.size < 3) {
+                // free now or freed by this batch: only those can take a touch meant for another arrow
+                val stealers = b.free(HashSet(removed).apply { batch.forEach { add(it.arrow) } }).mapTo(HashSet()) { it.id }
+                val rest = free.filter { f -> batch.none { it.arrow == f.id } }
+                batch.add(chooseTap(b, rest, occ, s, nl, stealers, if (batch.isEmpty()) 0.0 else 1.5) ?: break)
+            }
+            if (batch.isEmpty()) {
                 prePan = Pair(di, dj)
                 val moved = panToward(s, nl, free) ?: return fail("The free arrows are out of reach (off-screen, and the board won't pan there)")
                 wide = (maxOf(abs(moved.first), abs(moved.second)) / nl.p).roundToInt() * 2 + 4
                 sleep(500); continue
             }
-            dev.status("Clearing ${removed.size + 1}/${b.arrows.size}…")
+            dev.status("Clearing ${removed.size + batch.size}/${b.arrows.size}…")
             unreachable.clear() // the board changed: earlier unreachable arrows may be fine now
-            if (!dev.tap(pick.x, pick.y)) return fail("Tap was rejected")
-            removed.add(pick.arrow)
-            lastTap = pick.arrow
+            for ((n, t) in batch.withIndex()) {
+                // back-to-back taps land in one game frame as two fingers, and the game ignores both
+                if (n > 0) sleep(100)
+                if (!dev.tap(t.x, t.y)) return fail("Tap was rejected")
+                removed.add(t.arrow)
+                tappedAt[t.arrow] = System.currentTimeMillis()
+                dev.debug("tap ${t.arrow} at ${t.cell} px=(${t.x.roundToInt()},${t.y.roundToInt()}) room=${"%.2f".format(t.room)} at=($di,$dj)")
+            }
+            lastTaps = batch.map { it.arrow }
             dev.showMap(mapDrawing())
-            sleep(350)
+            sleep(150) // a sliding arrow no longer blocks the next check: the cells under it are skipped
         }
     }
 
@@ -351,7 +392,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             if (o.v != (g in occ)) bad++
             // emptied-cell dots mark exactly the cells where arrows used to be: a fingerprint of the level
             else if (!o.v) {
-                if (ec != null) { if ((v.dot[k] == true) != (g in ec)) bad++ }
+                if (ec != null) { if ((v.dot[k] == true) != (g in ec) && g !in freshCells) bad++ }
                 else if (v.dot[k] == true && !b.inBounds(g)) bad++
             }
         }
@@ -372,10 +413,15 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         return best?.copy(secondBad = second)
     }
 
-    private data class Tap(val arrow: Int, val x: Float, val y: Float)
+    /** [room] = distance in cells from the tapped cell to the nearest cell of another free arrow. */
+    private data class Tap(val arrow: Int, val cell: Cell, val x: Float, val y: Float, val room: Double)
 
-    /** Pick the visible cell of a free arrow that is farthest from any blocked arrow. */
-    private fun chooseTap(b: Board, free: List<Arrow>, occ: Map<Cell, Int>, s: Shot, l: Lattice): Tap? {
+    /**
+     * Pick the visible cell of a free arrow that is far from blocked arrows and has room around it: the game takes
+     * the nearest *unblocked* arrow within 1 cell of the touch, so a free neighbour ([stealers]) 1 cell away can take
+     * a touch that lands a little off; blocked neighbours can't. Cells closer than [minRoom] to a stealer are skipped.
+     */
+    private fun chooseTap(b: Board, free: List<Arrow>, occ: Map<Cell, Int>, s: Shot, l: Lattice, stealers: Set<Int>, minRoom: Double = 0.0): Tap? {
         val freeIds = free.map { it.id }.toSet()
         val blockedCells = occ.filterValues { it !in freeIds }.keys
         val rects = dev.overlayRects().map { Rect(it.left - l.p.toInt(), it.top - l.p.toInt(), it.right + l.p.toInt(), it.bottom + l.p.toInt()) }
@@ -391,8 +437,14 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             if (sx < edge || sx > s.w - edge || sy < s.top + 0.5 * l.q || sy > s.bottom - 0.5 * l.q) continue
             if (rects.any { it.contains(sx, sy) } || s.uiCount(sx - ui, sy - ui, sx + ui, sy + ui) > 0) continue
             if (Parser.inEdgeHandle(s, sx, sy, l.p)) continue
-            val clear = blockedCells.minOfOrNull { it.dist(x) } ?: 99.0
-            if (clear > bestScore) { bestScore = clear; best = Tap(a.id, sx.toFloat(), sy.toFloat()) }
+            var room = 99.0 // nothing within 3 cells
+            for (dc in -3..3) for (dr in -3..3) {
+                val o = occ[Cell(x.c + dc, x.r + dr)] ?: continue
+                if (o != a.id && o in stealers) room = min(room, hypot(dc.toDouble(), dr.toDouble()))
+            }
+            if (room < minRoom) continue
+            val score = min((blockedCells.minOfOrNull { it.dist(x) } ?: 99.0) + 0.5, room)
+            if (score > bestScore) { bestScore = score; best = Tap(a.id, x, sx.toFloat(), sy.toFloat(), room) }
         }
         }
         return best
@@ -497,13 +549,46 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     }
 
     /** Whole level for the mini-map: green = can go now, orange = blocked, red = waiting (tapped while blocked). */
+    // ---- live overlay tracking (between runs) ----
+    private var tLat: Lattice? = null
+    private var tDi = 0
+    private var tDj = 0
+
+    /** Forget the tracker's own position so it starts again from the last Analyze/Solve position. */
+    fun resetTracking() { tLat = null }
+
+    /**
+     * One step of keeping the green/yellow drawing on the real arrows while nothing is running. The camera position
+     * exists only inside the game, so it is re-measured from a screenshot. Returns the drawing, or null to hide it
+     * (arrow or board still moving, zoom just changed, or the screen no longer matches the plan).
+     */
+    fun trackOnce(): PlanDrawing? {
+        val b = board ?: return null
+        val cur = tLat ?: lat ?: return null
+        if (tLat == null) { tDi = di; tDj = dj }
+        val s = dev.capture(lineColor) ?: return null
+        if (s.busyPx > 40) return null
+        var nl = Grid.find(s, cur, useDots = true) ?: return null
+        var w = 3
+        val zoomed = Grid.find(s)?.takeIf { abs(it.p - cur.p) > 0.03 * cur.p }
+        if (zoomed != null) { nl = zoomed; w = 30 }
+        val ei = if (zoomed != null) tDi else tDi - ((cur.ax - nl.ax) / cur.p).roundToInt()
+        val ej = if (zoomed != null) tDj else tDj - ((cur.ay - nl.ay) / cur.q).roundToInt()
+        val view = Parser.parse(s, nl, dev.overlayRects(), nodesOnly = true)
+        var loc = locate(b, b.occupancy(removed), view, ei, ej, w, w) ?: return null
+        if (loc.bad > 0 && w < 16) loc = locate(b, b.occupancy(removed), view, ei, ej, 16, 16) ?: return null
+        if (loc.bad > 0 || loc.secondBad <= 2) return null
+        tLat = nl; tDi = loc.di; tDj = loc.dj
+        return drawing(b, nl, loc.di, loc.dj)
+    }
+
     fun mapDrawing(): MapDrawing? {
         val b = board ?: return null
         val free = b.free(removed).map { it.id }.toSet()
         val paths = b.arrows.filter { it.id !in removed }.map { a ->
             val pts = FloatArray(a.cells.size * 2)
             a.cells.forEachIndexed { k, x -> pts[2 * k] = (x.c - b.minC).toFloat(); pts[2 * k + 1] = (x.r - b.minR).toFloat() }
-            Pair(pts, when { a.id in pending -> 0xFFFF4B5D.toInt(); a.id in free -> 0xFF35E07A.toInt(); else -> 0xFFFF9F43.toInt() })
+            Pair(pts, when { a.id in pending -> 0xFFFF4B5D.toInt(); a.id in free -> 0xFF3DDC84.toInt(); else -> 0xFFFFD54F.toInt() })
         }
         return MapDrawing(b.maxC - b.minC + 1, b.maxR - b.minR + 1, paths)
     }
@@ -512,10 +597,11 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         val free = b.free(removed).map { it.id }.toSet()
         val paths = b.arrows.filter { it.id !in removed }.map { a ->
             val pts = FloatArray(a.cells.size * 2)
-            a.cells.forEachIndexed { k, x -> pts[2 * k] = l.x(x.c - di).toFloat(); pts[2 * k + 1] = l.y(x.r - dj).toFloat() }
-            Pair(pts, if (a.id in free) 0xFF35E07A.toInt() else 0xFFFF9F43.toInt())
+            // screenshot pixel i covers [i, i+1), so a line centred on index c sits at c + 0.5 on the canvas
+            a.cells.forEachIndexed { k, x -> pts[2 * k] = l.x(x.c - di).toFloat() + 0.5f; pts[2 * k + 1] = l.y(x.r - dj).toFloat() + 0.5f }
+            Pair(pts, if (a.id in free) 0xFF3DDC84.toInt() else 0xFFFFD54F.toInt())
         }
-        return PlanDrawing(paths)
+        return PlanDrawing(paths, l.p.toFloat())
     }
 
 }
