@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Arrows Solver</string>
+    <string name="a11y_label">Arrows Solver bubble</string>
+    <string name="a11y_description">Shows a floating button over the Arrows game. It takes screenshots to read the level and taps arrows for you, only when you press Analyze or Solve. Nothing leaves the phone.</string>
+</resources>
