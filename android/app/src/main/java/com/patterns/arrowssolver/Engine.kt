@@ -19,6 +19,12 @@ interface Device {
     fun overlayRects(): List<Rect>
     fun status(msg: String)
     fun showPlan(d: PlanDrawing?)
+    /** We are dragging the board by (dx, dy) px over [ms]: move the drawing along with it. */
+    fun boardShift(dx: Float, dy: Float, ms: Long)
+    /** Arrow [id] was tapped: animate it leaving like the game's (cells tail..head, head direction). */
+    fun arrowLeaving(id: Int, cells: FloatArray, dx: Int, dy: Int)
+    /** A level was solved: [arrows] cleared by this run in [ms]. */
+    fun recordSolved(arrows: Int, ms: Long)
     /** True when screenshots contain only the game window, so our overlays can stay visible while solving. */
     val overlaysHiddenFromCapture: Boolean
     /** Whole-level mini-map drawn by the app (the game can't zoom out far enough for wide boards). */
@@ -28,8 +34,11 @@ interface Device {
     fun debug(msg: String)
 }
 
-/** Arrows in screen pixels (tail..head polylines) with colours, drawn over the game's own arrows; [pitch] = cell size. */
-class PlanDrawing(val paths: List<Pair<FloatArray, Int>>, val pitch: Float)
+/**
+ * Arrows [ids] as tail..head polylines in board cells, with colours, drawn over the game's own arrows.
+ * Board cell (c, r) is at screen pixel (ox + c * sx, oy + r * sy).
+ */
+class PlanDrawing(val ids: IntArray, val paths: List<Pair<FloatArray, Int>>, val ox: Float, val oy: Float, val sx: Float, val sy: Float)
 
 /** Board-space drawing of the whole level: w x h cells, polylines in cell units with colours. */
 class MapDrawing(val w: Int, val h: Int, val paths: List<Pair<FloatArray, Int>>)
@@ -240,11 +249,13 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         startWide = 0
         var reanalysed = false
         var lastTaps = emptyList<Int>()
+        val t0 = System.currentTimeMillis(); val left0 = b.arrows.size - removed.size
         var heartLow = 0
         while (true) {
             if (dev.stopRequested) return fail("Stopped (${removed.size}/${b.arrows.size} cleared)")
             val occ = b.occupancy(removed)
             if (occ.isEmpty()) {
+                dev.recordSolved(left0, System.currentTimeMillis() - t0)
                 dev.status("Solved ✓ ${b.arrows.size} arrows cleared")
                 return true
             }
@@ -329,7 +340,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
                     }
                     return fail("Screen doesn't match the plan (${loc?.bad ?: "?"} cells off) — stopped for safety")
                 }
-                sleep(300); continue
+                sleep(150); continue
             }
             if (loc.secondBad <= 2) return fail("Can't tell exactly where the board is — stopped for safety")
             // the camera must hold still between two frames, or the game would ignore the tap
@@ -346,11 +357,11 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             if (autoGone.isNotEmpty()) { removed.addAll(autoGone); dev.debug("red arrows leaving by themselves: $autoGone"); continue }
             val free = b.free(removed).filter { it.id !in pending }
             if (free.isEmpty()) return fail("No arrow can move; the reading must be wrong")
-            // Up to 3 taps per checked frame. The game drops a tapped arrow from its grid at once, so the others stay
+            // Up to 5 taps per checked frame. The game drops a tapped arrow from its grid at once, so the others stay
             // free; after the first, only cells with no other arrow within 1.5 cells, so a slightly-off touch can't
             // reach a neighbour.
             val batch = ArrayList<Tap>()
-            while (batch.size < 3) {
+            while (batch.size < 5) {
                 // free now or freed by this batch: only those can take a touch meant for another arrow
                 val stealers = b.free(HashSet(removed).apply { batch.forEach { add(it.arrow) } }).mapTo(HashSet()) { it.id }
                 val rest = free.filter { f -> batch.none { it.arrow == f.id } }
@@ -370,6 +381,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
                 if (!dev.tap(t.x, t.y)) return fail("Tap was rejected")
                 removed.add(t.arrow)
                 tappedAt[t.arrow] = System.currentTimeMillis()
+                b.arrows[t.arrow].let { dev.arrowLeaving(it.id, cellsOf(it), it.dir.dx, it.dir.dy) }
                 dev.debug("tap ${t.arrow} at ${t.cell} px=(${t.x.roundToInt()},${t.y.roundToInt()}) room=${"%.2f".format(t.room)} at=($di,$dj)")
             }
             lastTaps = batch.map { it.arrow }
@@ -511,6 +523,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         if (len < 2f * l.p) return null
         val gap = max(90f, 1.5f * l.p.toFloat())
         val ox = if (ux != 0f) 0f else gap / 2; val oy = if (ux != 0f) gap / 2 else 0f
+        dev.boardShift(ux * len, uy * len, 900)
         val ok = dev.pinch(
             x0 - ox, y0 - oy, x0 - ox + ux * len, y0 - oy + uy * len,
             x0 + ox, y0 + oy, x0 + ox + ux * len, y0 + oy + uy * len, 900,
@@ -593,15 +606,19 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         return MapDrawing(b.maxC - b.minC + 1, b.maxR - b.minR + 1, paths)
     }
 
+    private fun cellsOf(a: Arrow) = FloatArray(a.cells.size * 2).also { p ->
+        a.cells.forEachIndexed { k, x -> p[2 * k] = x.c.toFloat(); p[2 * k + 1] = x.r.toFloat() }
+    }
+
     private fun drawing(b: Board, l: Lattice, di: Int, dj: Int): PlanDrawing {
         val free = b.free(removed).map { it.id }.toSet()
-        val paths = b.arrows.filter { it.id !in removed }.map { a ->
-            val pts = FloatArray(a.cells.size * 2)
-            // screenshot pixel i covers [i, i+1), so a line centred on index c sits at c + 0.5 on the canvas
-            a.cells.forEachIndexed { k, x -> pts[2 * k] = l.x(x.c - di).toFloat() + 0.5f; pts[2 * k + 1] = l.y(x.r - dj).toFloat() + 0.5f }
-            Pair(pts, if (a.id in free) 0xFF3DDC84.toInt() else 0xFFFFD54F.toInt())
-        }
-        return PlanDrawing(paths, l.p.toFloat())
+        val shown = b.arrows.filter { it.id !in removed }
+        val paths = shown.map { a -> Pair(cellsOf(a), if (a.id in free) 0xFF3DDC84.toInt() else 0xFFFFD54F.toInt()) }
+        // screenshot pixel i covers [i, i+1), so a line centred on index c sits at c + 0.5 on the canvas
+        return PlanDrawing(
+            shown.map { it.id }.toIntArray(), paths,
+            (l.ax - di * l.p + 0.5).toFloat(), (l.ay - dj * l.q + 0.5).toFloat(), l.p.toFloat(), l.q.toFloat(),
+        )
     }
 
 }

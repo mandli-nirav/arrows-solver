@@ -71,14 +71,25 @@ function Step({n, children}: {n: number; children: string}) {
   );
 }
 
+function Stat({value, label}: {value: string; label: string}) {
+  return (
+    <View style={s.stat} accessible accessibilityLabel={`${label}: ${value}`}>
+      <Text style={s.statValue}>{value}</Text>
+      <Text style={s.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
 export default function App() {
   const [enabled, setEnabled] = useState(false);
   const [status, setStatus] = useState('');
   const [gameMissing, setGameMissing] = useState(false);
+  const [stats, setStats] = useState({levels: 0, arrows: 0, ms: 0});
 
   const refresh = useCallback(() => {
     setEnabled(NativeSolver.isServiceEnabled());
     setStatus(NativeSolver.getStatus());
+    setStats(NativeSolver.getStats());
   }, []);
 
   useEffect(() => {
@@ -130,6 +141,15 @@ export default function App() {
           </Card>
 
           <Card>
+            <Text style={s.cardTitle}>Solved so far</Text>
+            <View style={s.stats}>
+              <Stat value={String(stats.levels)} label="Levels" />
+              <Stat value={String(stats.arrows)} label="Arrows" />
+              <Stat value={stats.arrows ? `${(stats.ms / 1000 / stats.arrows).toFixed(2)} s` : '—'} label="Per arrow" />
+            </View>
+          </Card>
+
+          <Card>
             <Text style={s.cardTitle}>Status</Text>
             <Text style={s.status}>{status || '—'}</Text>
           </Card>
@@ -170,5 +190,9 @@ const s = StyleSheet.create({
   },
   stepText: {flex: 1, color: C.text, fontFamily: F.medium, fontSize: 15, lineHeight: 22},
   status: {color: C.text, fontFamily: F.medium, fontSize: 15, lineHeight: 22, paddingHorizontal: 20, paddingBottom: 12},
+  stats: {flexDirection: 'row', paddingHorizontal: 12, paddingBottom: 12},
+  stat: {flex: 1, alignItems: 'center', paddingVertical: 8},
+  statValue: {color: C.text, fontFamily: F.semi, fontSize: 24},
+  statLabel: {color: C.dim, fontFamily: F.medium, fontSize: 13, marginTop: 2},
   warn: {color: C.red, fontFamily: F.medium, fontSize: 14, paddingHorizontal: 20, paddingBottom: 10},
 });

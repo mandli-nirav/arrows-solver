@@ -37,6 +37,7 @@ import kotlin.math.roundToInt
 class SolverService : AccessibilityService(), Device {
 
     companion object {
+        const val STATS = "stats"
         const val GAME = "com.ecffri.arrows"
         @Volatile var instance: SolverService? = null; private set
         @Volatile var lastStatus: String = "Ready. Start a level, then tap Analyze or Solve."; private set
@@ -282,6 +283,16 @@ class SolverService : AccessibilityService(), Device {
         main.post { statusView?.text = msg }
     }
 
+    override fun boardShift(dx: Float, dy: Float, ms: Long) = onMain { planView?.shift(dx, dy, ms) }
+
+    override fun arrowLeaving(id: Int, cells: FloatArray, dx: Int, dy: Int) = onMain { planView?.leave(id, cells, dx, dy) }
+
+    override fun recordSolved(arrows: Int, ms: Long) {
+        val p = getSharedPreferences(STATS, MODE_PRIVATE)
+        p.edit().putInt("levels", p.getInt("levels", 0) + 1).putInt("arrows", p.getInt("arrows", 0) + arrows)
+            .putLong("ms", p.getLong("ms", 0) + ms).apply()
+    }
+
     override fun showMap(d: MapDrawing?) {
         main.post { mapView?.drawing = d; mapView?.invalidate(); refresh() }
     }
@@ -331,6 +342,9 @@ class SolverService : AccessibilityService(), Device {
             if (windowShots == null) debug("window-only screenshots: no game window (active root=${root?.packageName}, windows=${runCatching { windows.size }.getOrNull()})")
             return null
         }
+        val wait = lastShot + 340 - android.os.SystemClock.uptimeMillis()
+        if (wait > 0) Thread.sleep(wait) // Android allows about one screenshot every 333 ms; asking sooner fails
+        lastShot = android.os.SystemClock.uptimeMillis()
         val latch = CountDownLatch(1)
         var bmp: Bitmap? = null
         takeScreenshotOfWindow(win, mainExecutor, object : TakeScreenshotCallback {
@@ -360,6 +374,7 @@ class SolverService : AccessibilityService(), Device {
     }
 
     private val captureLock = Any()
+    private var lastShot = 0L
 
     override fun capture(lineColor: Int?): Shot? = synchronized(captureLock) {
         captureGameWindow(lineColor)?.let { return it }
@@ -442,52 +457,149 @@ class SolverService : AccessibilityService(), Device {
         gesture(Path().apply { moveTo(x1, y1); lineTo(x2, y2) }, ms)
 }
 
-/** Full-screen, touch-through drawing of the analysed arrows (green = can go now). */
+/**
+ * Full-screen, touch-through drawing of the analysed arrows over the game's own (green = can go now).
+ * Arrows are kept in board cells. Where the board sits on screen is a transform that glides to every new fix and
+ * moves in step with our own drags, so between the (rate-limited, ~3 a second) screenshots it stays on the board
+ * at the display's frame rate. A tapped arrow slides out the way the game moves it: 50 cells a second
+ * (ArrowView.MoveOutStraight), head first, its body following its own path.
+ */
 class PlanView(private val ctx: Context) : View(ctx) {
     var drawing: PlanDrawing? = null
+        set(d) {
+            val old = field
+            field = d
+            if (d == null) { glide?.cancel(); leaving.clear(); invalidate(); return }
+            shapes = d.paths.map { (pts, color) -> Shape(pts, color) }
+            gone.clear()
+            val to = floatArrayOf(d.ox, d.oy, d.sx, d.sy)
+            if (old == null) { glide?.cancel(); to.copyInto(m); to.copyInto(target) } else moveTo(to, 250, android.view.animation.DecelerateInterpolator())
+            invalidate()
+        }
+
+    /** One arrow, ready to draw: its path in cells, tail point, head point and head angle. */
+    private class Shape(pts: FloatArray, val color: Int) {
+        val path = Path()
+        val tx = pts[0]; val ty = pts[1]
+        val hx = pts[pts.size - 2]; val hy = pts[pts.size - 1]
+        val deg = if (pts.size < 4) 0f else angle(hx - pts[pts.size - 4], hy - pts[pts.size - 3])
+        init { path.moveTo(pts[0], pts[1]); for (i in 2 until pts.size step 2) path.lineTo(pts[i], pts[i + 1]) }
+    }
+
+    private class Leave(val pts: FloatArray, val ex: Float, val ey: Float, val color: Int, val t0: Long) {
+        val len = (2 until pts.size step 2).sumOf { i -> kotlin.math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]).toDouble() }.toFloat()
+    }
+
+    private var shapes = emptyList<Shape>()
+    private val gone = HashSet<Int>()
+    private val leaving = ArrayList<Leave>()
+    /** Shown transform (ox, oy, sx, sy) and the one it is moving to. */
+    private val m = FloatArray(4)
+    private val target = FloatArray(4)
+    private var glide: android.animation.ValueAnimator? = null
+
+    private fun moveTo(to: FloatArray, ms: Long, ease: android.animation.TimeInterpolator) {
+        val from = m.copyOf()
+        to.copyInto(target)
+        glide?.cancel()
+        glide = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = ms; interpolator = ease
+            addUpdateListener { a -> val f = a.animatedValue as Float; for (i in 0..3) m[i] = from[i] + (to[i] - from[i]) * f; invalidate() }
+            start()
+        }
+    }
+
+    /** The board is being dragged by (dx, dy) px over [ms] by our own gesture: follow it. */
+    fun shift(dx: Float, dy: Float, ms: Long) {
+        if (drawing == null) return
+        moveTo(target.copyOf().also { it[0] += dx; it[1] += dy }, ms, android.view.animation.LinearInterpolator())
+    }
+
+    fun leave(id: Int, pts: FloatArray, dx: Int, dy: Int) {
+        val d = drawing ?: return
+        if (pts.size < 2) return
+        val k = d.ids.indexOf(id)
+        gone.add(id)
+        // the game starts the slide ~50 ms after the touch ends (next input frame, then render + compose)
+        leaving.add(Leave(pts, dx.toFloat(), dy.toFloat(), if (k >= 0) d.paths[k].second else 0xFF3DDC84.toInt(), android.os.SystemClock.uptimeMillis() + START_DELAY))
+        invalidate()
+    }
+
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        // Same geometry as the game (ArrowView), in cells: body ~0.2 wide (a touch wider here to cover the game's
+        // lavender), rounded corners, ArrowHead sprite 256 px at 300 px/unit = 0.853 cell, ArrowEnd circle as tail cap.
+        strokeWidth = 0.25f; pathEffect = android.graphics.CornerPathEffect(0.2f)
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val sprite = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val loc = IntArray(2)
     private val rect = android.graphics.RectF()
+    private val snakePath = Path()
+    private val triangle = Path().apply { moveTo(0f, -0.38f); lineTo(-0.32f, 0.26f); lineTo(0.32f, 0.26f); close() }
 
     /** The game's own white sprites, extracted from the user's APK by tools/extract_levels.py (not in the repo). */
     private val head: Bitmap? = runCatching { ctx.assets.open("game/ArrowHead.png").use { android.graphics.BitmapFactory.decodeStream(it) } }.getOrNull()
     private val tail: Bitmap? = runCatching { ctx.assets.open("game/ArrowEnd.png").use { android.graphics.BitmapFactory.decodeStream(it) } }.getOrNull()
 
+    private fun arrow(c: Canvas, path: Path, color: Int, tx: Float, ty: Float, hx: Float, hy: Float, deg: Float) {
+        stroke.color = color; fill.color = color
+        sprite.colorFilter = android.graphics.PorterDuffColorFilter(color, android.graphics.PorterDuff.Mode.SRC_IN)
+        c.drawPath(path, stroke)
+        tail?.let { rect.set(tx - 0.13f, ty - 0.13f, tx + 0.13f, ty + 0.13f); c.drawBitmap(it, null, rect, sprite) }
+        c.save(); c.translate(hx, hy); c.rotate(deg)
+        val h = head
+        if (h != null) { rect.set(-0.46f, -0.46f, 0.46f, 0.46f); c.drawBitmap(h, null, rect, sprite) } else c.drawPath(triangle, fill)
+        c.restore()
+    }
+
     override fun onDraw(c: Canvas) {
         val d = drawing ?: return
         getLocationOnScreen(loc)
-        c.translate(-loc[0].toFloat(), -loc[1].toFloat())
-        // Same geometry as the game (ArrowView): body ~0.2 cell wide, ArrowHead sprite 256 px at 300 px/unit = 0.853 cell,
-        // centred on the head cell, ArrowEnd circle as the tail cap. Drawn a touch larger and opaque to fully cover the
-        // game's lavender arrow, so it looks recoloured.
-        val p = d.pitch
-        stroke.strokeWidth = 0.25f * p
-        stroke.pathEffect = android.graphics.CornerPathEffect(0.2f * p)
-        for ((pts, color) in d.paths) {
-            if (pts.size < 4) continue
-            stroke.color = color; fill.color = color
-            sprite.colorFilter = android.graphics.PorterDuffColorFilter(color, android.graphics.PorterDuff.Mode.SRC_IN)
-            val n = pts.size
-            c.drawPath(Path().apply { moveTo(pts[0], pts[1]); for (i in 2 until n step 2) lineTo(pts[i], pts[i + 1]) }, stroke)
-            val tr = 0.13f * p
-            val t = tail
-            if (t != null) { rect.set(pts[0] - tr, pts[1] - tr, pts[0] + tr, pts[1] + tr); c.drawBitmap(t, null, rect, sprite) }
-            val hx = pts[n - 2]; val hy = pts[n - 1]
-            val deg = Math.toDegrees(kotlin.math.atan2((hx - pts[n - 4]).toDouble(), -(hy - pts[n - 3]).toDouble())).toFloat()
-            val h = head
-            val half = 0.46f * p
-            c.save(); c.rotate(deg, hx, hy)
-            if (h != null) {
-                rect.set(hx - half, hy - half, hx + half, hy + half); c.drawBitmap(h, null, rect, sprite)
-            } else { // no extracted sprite: a plain triangle in the same place
-                c.drawPath(Path().apply { moveTo(hx, hy - 0.38f * p); lineTo(hx - 0.32f * p, hy + 0.26f * p); lineTo(hx + 0.32f * p, hy + 0.26f * p); close() }, fill)
-            }
-            c.restore()
+        c.translate(m[0] - loc[0], m[1] - loc[1]); c.scale(m[2], m[3])
+        for ((k, sh) in shapes.withIndex()) if (d.ids[k] !in gone) arrow(c, sh.path, sh.color, sh.tx, sh.ty, sh.hx, sh.hy, sh.deg)
+        val now = android.os.SystemClock.uptimeMillis()
+        leaving.removeAll { (now - it.t0) * SPEED / 1000f > it.len + OUT }
+        for (l in leaving) {
+            snake(l, maxOf(0L, now - l.t0) * SPEED / 1000f)
+            arrow(c, snakePath, l.color, sx0, sy0, sx1, sy1, angle(l.ex, l.ey))
         }
+        if (leaving.isNotEmpty()) postInvalidateOnAnimation()
+    }
+
+    private var sx0 = 0f; private var sy0 = 0f; private var sx1 = 0f; private var sy1 = 0f
+
+    /** [snakePath] = the stretch [d, d + len] of the arrow's path continued straight on from its head. */
+    private fun snake(l: Leave, d: Float) {
+        snakePath.rewind()
+        val p = l.pts; val n = p.size / 2
+        var acc = 0f; var started = false
+        for (i in 0 until n) {
+            val x0 = p[2 * i]; val y0 = p[2 * i + 1]
+            val last = i == n - 1
+            val x1 = if (last) x0 + l.ex * (OUT + l.len + 1) else p[2 * i + 2]
+            val y1 = if (last) y0 + l.ey * (OUT + l.len + 1) else p[2 * i + 3]
+            val seg = kotlin.math.hypot(x1 - x0, y1 - y0)
+            if (seg == 0f) continue
+            val a0 = maxOf(d, acc); val a1 = minOf(d + l.len, acc + seg)
+            if (a1 >= a0) {
+                val u0 = (a0 - acc) / seg; val u1 = (a1 - acc) / seg
+                if (!started) { sx0 = x0 + (x1 - x0) * u0; sy0 = y0 + (y1 - y0) * u0; snakePath.moveTo(sx0, sy0); started = true }
+                sx1 = x0 + (x1 - x0) * u1; sy1 = y0 + (y1 - y0) * u1
+                snakePath.lineTo(sx1, sy1)
+            }
+            acc += seg
+            if (acc >= d + l.len) break
+        }
+    }
+
+    private companion object {
+        /** ArrowView.MoveOutStraight: DOVirtual.Float 0 -> 50 in 1 s, linear, then on at the same speed. */
+        const val SPEED = 50f
+        /** Cells travelled past the head before the drawing is dropped (off any board). */
+        const val OUT = 60f
+        const val START_DELAY = 50L
+        fun angle(dx: Float, dy: Float) = Math.toDegrees(kotlin.math.atan2(dx.toDouble(), -dy.toDouble())).toFloat()
     }
 }
 
