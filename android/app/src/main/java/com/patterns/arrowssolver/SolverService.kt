@@ -520,7 +520,8 @@ class PlanView(private val ctx: Context) : View(ctx) {
         if (pts.size < 2) return
         val k = d.ids.indexOf(id)
         gone.add(id)
-        // the game starts the slide ~50 ms after the touch ends (next input frame, then render + compose)
+        // The game's slide becomes visible ~130 ms after our tap gesture reports done (measured on a screen recording:
+        // input is read on the next game frame, the tween starts the frame after, then render + compose).
         leaving.add(Leave(pts, dx.toFloat(), dy.toFloat(), if (k >= 0) d.paths[k].second else 0xFF3DDC84.toInt(), android.os.SystemClock.uptimeMillis() + START_DELAY))
         invalidate()
     }
@@ -561,7 +562,8 @@ class PlanView(private val ctx: Context) : View(ctx) {
         val now = android.os.SystemClock.uptimeMillis()
         leaving.removeAll { (now - it.t0) * SPEED / 1000f > it.len + OUT }
         for (l in leaving) {
-            snake(l, maxOf(0L, now - l.t0) * SPEED / 1000f)
+            val d = maxOf(0L, now - l.t0) * SPEED / 1000f
+            snake(l, d, minOf(SLACK, d))
             arrow(c, snakePath, l.color, sx0, sy0, sx1, sy1, angle(l.ex, l.ey))
         }
         if (leaving.isNotEmpty()) postInvalidateOnAnimation()
@@ -569,8 +571,11 @@ class PlanView(private val ctx: Context) : View(ctx) {
 
     private var sx0 = 0f; private var sy0 = 0f; private var sx1 = 0f; private var sy1 = 0f
 
-    /** [snakePath] = the stretch [d, d + len] of the arrow's path continued straight on from its head. */
-    private fun snake(l: Leave, d: Float) {
+    /**
+     * [snakePath] = the stretch [d - s, d + len + s] of the arrow's path continued straight on from its head; the slack
+     * [s] covers the game's arrow when its frame timing puts it a little ahead of or behind ours.
+     */
+    private fun snake(l: Leave, d: Float, s: Float) {
         snakePath.rewind()
         val p = l.pts; val n = p.size / 2
         var acc = 0f; var started = false
@@ -581,7 +586,7 @@ class PlanView(private val ctx: Context) : View(ctx) {
             val y1 = if (last) y0 + l.ey * (OUT + l.len + 1) else p[2 * i + 3]
             val seg = kotlin.math.hypot(x1 - x0, y1 - y0)
             if (seg == 0f) continue
-            val a0 = maxOf(d, acc); val a1 = minOf(d + l.len, acc + seg)
+            val a0 = maxOf(d - s, acc); val a1 = minOf(d + l.len + s, acc + seg)
             if (a1 >= a0) {
                 val u0 = (a0 - acc) / seg; val u1 = (a1 - acc) / seg
                 if (!started) { sx0 = x0 + (x1 - x0) * u0; sy0 = y0 + (y1 - y0) * u0; snakePath.moveTo(sx0, sy0); started = true }
@@ -589,16 +594,21 @@ class PlanView(private val ctx: Context) : View(ctx) {
                 snakePath.lineTo(sx1, sy1)
             }
             acc += seg
-            if (acc >= d + l.len) break
+            if (acc >= d + l.len + s) break
         }
     }
 
     private companion object {
-        /** ArrowView.MoveOutStraight: DOVirtual.Float 0 -> 50 in 1 s, linear, then on at the same speed. */
-        const val SPEED = 50f
+        /**
+         * ArrowView.MoveOutStraight: DOVirtual.Float 0 -> 50 in 1 s, linear, then on at the same speed. On a
+         * screen recording the game's arrow ran ~8% faster than ours at 50, so 54.
+         */
+        const val SPEED = 54f
         /** Cells travelled past the head before the drawing is dropped (off any board). */
         const val OUT = 60f
-        const val START_DELAY = 50L
+        const val START_DELAY = 130L
+        /** Cells our sliding arrow may stretch at each end to keep the game's covered (measured scatter ~0.5 cell). */
+        const val SLACK = 0.6f
         fun angle(dx: Float, dy: Float) = Math.toDegrees(kotlin.math.atan2(dx.toDouble(), -dy.toDouble())).toFloat()
     }
 }
