@@ -1,4 +1,4 @@
-package com.patterns.arrowssolver
+package com.arrowssolver
 
 import kotlin.math.hypot
 

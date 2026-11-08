@@ -7,8 +7,9 @@ export interface Spec extends TurboModule {
   openAppInfo(): void;
   openGame(): boolean;
   getStatus(): string;
-  /** Totals over every level the bubble solved: levels, arrows cleared, solving time in ms. */
-  getStats(): {levels: number; arrows: number; ms: number};
+  /** Appearance: 'system', 'light' or 'dark'. The solver's drawer follows it too. */
+  getThemeMode(): string;
+  setThemeMode(mode: string): void;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('NativeSolver');

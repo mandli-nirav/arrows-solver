@@ -18,13 +18,13 @@ moving arrow (111..131,130..147,250); red blocked arrow / hearts (255,75,93); he
 At default zoom the grid pitch is 40 px. The board band starts below about 16% of screen height.
 
 ## Done
-- `android/app/src/main/java/com/patterns/arrowssolver/`
+- `android/app/src/main/java/com/arrowssolver/`
   - `Board.kt`: model, ray rule, free/plan solver.
   - `Vision.kt`: `Shot` pixel classes and integral images, `Grid` (pitch and phase from projections),
     `Parser` (nodes, edges, arrowhead probes), `Survey` (merge panned views, register, build arrows).
   - `Engine.kt`: analyze (pans to see boards wider than the screen) and solve (verify-before-every-tap,
     busy wait, heart guard, locate via lines and dots, choose the tap cell farthest from blocked arrows).
-  - Moved `MainActivity.kt` and `MainApplication.kt` out of the broken `java/com/com.patterns.arrowssolver/` folder.
+  - Moved `MainActivity.kt` and `MainApplication.kt` out of the broken `java/com/com.arrowssolver/` folder.
 - `prototype/`: the Python version that solved the live level (parse.py, solve.py, runner.py) plus
   reference screenshots. `screens/recon.png` is the parsed board.
 
@@ -41,7 +41,7 @@ At default zoom the grid pitch is 40 px. The board band starts below about 16% o
   Taps are allowed up to 0.35 cell from the screen edge, and free arrows the board won't pan to are skipped.
 - **Not yet verified on device:** the grid-view auto-off, the edge-tap margin and unreachable-target skipping (the last build).
   The pinch zoom gets cancelled whenever someone touches the screen. Keep hands off the phone during runs.
-- Debug trail: `adb shell cat /sdcard/Android/data/com.patterns.arrowssolver/files/debug/log.txt`, with frames `f*.png` beside it
+- Error log (only failures are written): `adb shell cat /sdcard/Android/data/com.arrowssolver/files/errors.log`
   (Git Bash needs `MSYS_NO_PATHCONV=1`).
 
 ## Zoom / pan from reverse engineering (2026-11-05, details in docs/GAME_INTERNALS.md)

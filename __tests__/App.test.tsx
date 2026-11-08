@@ -18,16 +18,17 @@ jest.mock('../specs/NativeSolver', () => ({
     openAppInfo: () => {},
     openGame: () => true,
     getStatus: () => 'test',
-    getStats: () => ({levels: 2, arrows: 120, ms: 90000}),
+    getThemeMode: () => 'system',
+    setThemeMode: () => {},
   },
 }));
 
-test('renders correctly, with the solved-so-far stats', async () => {
+test('renders the status from the solver', async () => {
   let r: ReactTestRenderer.ReactTestRenderer | undefined;
   await ReactTestRenderer.act(() => {
     r = ReactTestRenderer.create(<App />);
   });
-  expect(r!.root.findByProps({accessibilityLabel: 'Per arrow: 0.75 s'})).toBeTruthy();
+  expect(r!.root.findByProps({accessibilityLabel: 'Status. test'})).toBeTruthy();
   // unmount: App polls the service every 1.5 s, which would outlive the test
   await ReactTestRenderer.act(() => r!.unmount());
 });

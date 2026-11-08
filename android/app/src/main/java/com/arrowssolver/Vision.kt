@@ -1,4 +1,4 @@
-package com.patterns.arrowssolver
+package com.arrowssolver
 
 import android.graphics.Rect
 import kotlin.math.abs
@@ -12,6 +12,11 @@ import kotlin.math.roundToInt
 /** Board band as a fraction of screen height: hearts/progress header above, nav bar below. */
 const val BAND_TOP = 0.16
 const val BAND_BOTTOM = 0.955
+/**
+ * Taps and pan/zoom fingers stay above this (just over the '#' row), so the strip below is a safe place for the
+ * floating accessibility button: no touch of ours can land on it. Arrows lower down are panned up first.
+ */
+const val TAP_BOTTOM = 0.88
 private const val DEFAULT_LINE = 0xACB4F4
 
 /**
@@ -23,6 +28,8 @@ private const val DEFAULT_LINE = 0xACB4F4
 class Shot(val w: Int, val h: Int, px: IntArray, lineColorIn: Int?) {
     val top = (BAND_TOP * h).toInt()
     val bottom = (BAND_BOTTOM * h).toInt()
+    /** Lowest y our touches may reach. */
+    val tapBottom = (TAP_BOTTOM * h).toInt()
     val lineColor: Int = lineColorIn ?: detectLineColor(w, h, px, top, bottom)
     val line = BooleanArray(w * h)
     val dot = BooleanArray(w * h)

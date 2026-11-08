@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Material 3 top drawer over the game, in the phone's Dynamic Color (Material You) palette.
+  It slides down from the top edge and sits over the game's top bar; the board below stays visible.
+-->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto" android:id="@+id/drawer"
+    style="@style/Widget.Material3.CardView.Elevated"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    app:cardBackgroundColor="?attr/colorSurfaceContainerLow" app:cardElevation="6dp"
+    app:shapeAppearance="@style/ShapeAppearance.Arrows.TopDrawer">
+
+    <LinearLayout android:id="@+id/content" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:paddingHorizontal="16dp">
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:gravity="center_vertical" android:orientation="horizontal">
+
+            <FrameLayout android:layout_width="40dp" android:layout_height="40dp" android:background="@drawable/badge_bg">
+                <ImageView android:layout_width="22dp" android:layout_height="22dp" android:layout_gravity="center"
+                    android:importantForAccessibility="no" android:src="@drawable/ms_arrow_outward"
+                    android:tint="?attr/colorOnPrimaryContainer" />
+            </FrameLayout>
+
+            <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                android:layout_marginStart="12dp" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Arrows Solver" android:textAppearance="?attr/textAppearanceTitleMedium"
+                    android:textColor="?attr/colorOnSurface" />
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp" android:gravity="center_vertical" android:orientation="horizontal">
+                    <ImageView android:id="@+id/statusIcon" android:layout_width="16dp" android:layout_height="16dp"
+                        android:layout_marginEnd="6dp" android:importantForAccessibility="no" android:visibility="gone" />
+                    <TextView android:id="@+id/status" android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:maxLines="3"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" android:textColor="?attr/colorOnSurfaceVariant" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton android:id="@+id/close"
+                style="?attr/materialIconButtonStyle" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:contentDescription="Close" app:icon="@drawable/ms_close" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:orientation="horizontal">
+            <com.google.android.material.button.MaterialButton android:id="@+id/analyze"
+                android:maxLines="1" android:paddingStart="12dp" android:paddingEnd="12dp"
+                style="@style/Widget.Material3.Button.TonalButton" android:layout_width="0dp" android:layout_height="48dp"
+                android:layout_weight="1" android:text="Analyze"
+                app:icon="@drawable/ms_troubleshoot" app:iconGravity="textStart" app:iconSize="20dp" app:iconPadding="6dp" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/solve"
+                android:maxLines="1" android:paddingStart="12dp" android:paddingEnd="12dp"
+                style="@style/Widget.Material3.Button" android:layout_width="0dp" android:layout_height="48dp"
+                android:layout_marginHorizontal="8dp" android:layout_weight="1" android:text="Solve"
+                app:icon="@drawable/ms_play_arrow" app:iconGravity="textStart" app:iconSize="20dp" app:iconPadding="6dp" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/stop"
+                android:maxLines="1" android:paddingStart="12dp" android:paddingEnd="12dp"
+                style="@style/Widget.Material3.Button.TonalButton" android:layout_width="0dp" android:layout_height="48dp"
+                android:layout_weight="1" android:text="Stop" android:textColor="?attr/colorOnErrorContainer"
+                app:backgroundTint="?attr/colorErrorContainer" app:icon="@drawable/ms_stop"
+                app:iconTint="?attr/colorOnErrorContainer" app:iconGravity="textStart" app:iconSize="20dp" app:iconPadding="6dp" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" android:gravity="center_vertical" android:orientation="horizontal">
+            <com.google.android.material.chip.Chip android:id="@+id/map" style="@style/Widget.Material3.Chip.Filter"
+                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Map"
+                app:chipIcon="@drawable/ms_map" app:chipIconVisible="true" />
+        </LinearLayout>
+
+        <!-- whole-level map: small, view only (Map chip) -->
+        <FrameLayout android:id="@+id/mapHolder" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:background="@drawable/map_bg" android:padding="8dp"
+            android:visibility="gone" />
+
+        <!-- drag handle (Material 3 sheet style); tapping it closes the drawer -->
+        <FrameLayout android:id="@+id/handle" android:layout_width="match_parent" android:layout_height="24dp"
+            android:contentDescription="Close">
+            <View android:layout_width="32dp" android:layout_height="4dp" android:layout_gravity="center"
+                android:alpha="0.4" android:background="@drawable/handle_bg" />
+        </FrameLayout>
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

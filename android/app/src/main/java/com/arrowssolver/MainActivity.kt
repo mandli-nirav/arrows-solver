@@ -1,4 +1,4 @@
-package com.patterns.arrowssolver
+package com.arrowssolver
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

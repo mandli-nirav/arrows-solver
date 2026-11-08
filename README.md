@@ -58,9 +58,10 @@ Then open **Arrows Solver**, turn on **Bubble service** (Settings → Accessibil
 - Diagonal ("Diag") levels only work through the level lookup, not the screen-reading fallback.
 
 ## Debugging
-Each Analyze writes screenshots and a log on the phone:
-`adb shell cat /sdcard/Android/data/com.patterns.arrowssolver/files/debug/log.txt`
-(frames are `f*.png` in the same folder). Git Bash on Windows needs `MSYS_NO_PATHCONV=1` for those paths.
+Nothing about a level is kept on the phone. Only when something goes wrong, the error and the debug lines leading up
+to it are appended to `errors.log`:
+`adb shell cat /sdcard/Android/data/com.arrowssolver/files/errors.log`
+Git Bash on Windows needs `MSYS_NO_PATHCONV=1` for that path.
 
 `prototype/` holds the original Python version (adb + screenshots) that solved the first level; it's handy for trying ideas quickly.
 

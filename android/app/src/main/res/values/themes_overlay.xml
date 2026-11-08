@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Overlay theme. Dark, to sit on the game's dark board. On Android 12+ the colours are replaced by the phone's
+      Dynamic Color (Material You) palette from the wallpaper (DynamicColors.wrapContextIfAvailable); this seed
+      (the game's accent #5B71FF) is the fallback.
+    -->
+    <style name="Theme.Arrows.Overlay" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#BAC3FF</item>
+        <item name="colorOnPrimary">#0E2A99</item>
+        <item name="colorPrimaryContainer">#2B42B0</item>
+        <item name="colorOnPrimaryContainer">#DEE0FF</item>
+        <item name="colorSecondaryContainer">#424659</item>
+        <item name="colorOnSecondaryContainer">#DFE1F9</item>
+        <item name="colorSurfaceContainerLow">#1B1B21</item>
+        <item name="colorSurfaceContainerHigh">#2A2930</item>
+        <item name="colorOnSurface">#E4E1E9</item>
+        <item name="colorOnSurfaceVariant">#C6C5D0</item>
+        <item name="colorOutline">#90909A</item>
+        <item name="colorErrorContainer">#93000A</item>
+        <item name="colorOnErrorContainer">#FFDAD6</item>
+    </style>
+
+    <!-- Light variant (Appearance: Light, or System in light mode); same seed. -->
+    <style name="Theme.Arrows.Overlay.Light" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">#4A5CC8</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#DEE0FF</item>
+        <item name="colorOnPrimaryContainer">#00105C</item>
+        <item name="colorSecondaryContainer">#DFE1F9</item>
+        <item name="colorOnSecondaryContainer">#171B2C</item>
+        <item name="colorSurfaceContainerLow">#F5F2FA</item>
+        <item name="colorSurfaceContainerHigh">#E9E7EF</item>
+        <item name="colorOnSurface">#1B1B21</item>
+        <item name="colorOnSurfaceVariant">#46464F</item>
+        <item name="colorOutline">#767680</item>
+        <item name="colorErrorContainer">#FFDAD6</item>
+        <item name="colorOnErrorContainer">#410002</item>
+    </style>
+
+    <!-- top drawer: square at the screen edge, rounded where it meets the game -->
+    <style name="ShapeAppearance.Arrows.TopDrawer" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSizeTopLeft">0dp</item>
+        <item name="cornerSizeTopRight">0dp</item>
+        <item name="cornerSizeBottomLeft">28dp</item>
+        <item name="cornerSizeBottomRight">28dp</item>
+    </style>
+</resources>

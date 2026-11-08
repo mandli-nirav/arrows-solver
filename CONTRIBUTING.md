@@ -15,7 +15,7 @@ Thanks for helping. Issues and pull requests are welcome.
 Please include:
 - phone model, Android version, game version, light/dark mode;
 - the panel's status message;
-- the on-device debug folder: `adb pull /sdcard/Android/data/com.patterns.arrowssolver/files/debug` (log.txt and f*.png).
+- the error log: `adb pull /sdcard/Android/data/com.arrowssolver/files/errors.log`.
   Screenshots of a level are fine in an issue to show a bug.
 
 ## Code map

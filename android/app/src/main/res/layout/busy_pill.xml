@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- While a run is going: spinner + live status, bottom centre (the strip the solver never touches). Tap opens the drawer. -->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto" style="@style/Widget.Material3.CardView.Elevated"
+    android:layout_width="wrap_content" android:layout_height="wrap_content" android:contentDescription="Working. Tap to open the drawer."
+    app:cardBackgroundColor="?attr/colorSurfaceContainerHigh" app:cardCornerRadius="24dp" app:cardElevation="4dp">
+    <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:gravity="center_vertical" android:orientation="horizontal"
+        android:paddingVertical="10dp" android:paddingStart="14dp" android:paddingEnd="18dp">
+        <com.google.android.material.progressindicator.CircularProgressIndicator
+            android:layout_width="wrap_content" android:layout_height="wrap_content" android:indeterminate="true"
+            app:indicatorSize="20dp" app:trackThickness="3dp" />
+        <TextView android:id="@+id/busyText" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginStart="10dp" android:ellipsize="end" android:maxLines="1"
+            android:textAppearance="?attr/textAppearanceLabelLarge" android:textColor="?attr/colorOnSurface" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

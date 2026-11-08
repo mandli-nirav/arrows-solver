@@ -1,4 +1,4 @@
-package com.patterns.arrowssolver
+package com.arrowssolver
 
 import java.io.DataInputStream
 import java.io.InputStream

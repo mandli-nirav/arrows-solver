@@ -35,6 +35,59 @@ Method names below are from the game's IL2CPP metadata; nothing here is game cod
 - Input is ignored until the level is playing and `cameraStage == 10` (the intro zoom has finished).
 - As the board empties the camera re-centres (`FreeAreaFocusY`) and may re-zoom by itself.
 
+- `CameraMoveSystem` has no player-facing "reset view". Pans go through `ClampPan`/`ClampedPan` against
+  `CameraBoardGeometry.PanBounds`, with `Rubberband`/`ElasticMove` springing back past the bounds, so a pan toward the
+  middle can never lose the board. The game's own reset (`CameraStageResetSystem`) runs at level start only.
+- `LockLevelInputSystem.LockedByCameraStage`: input is locked while a camera stage runs (intro reveal, hint focus).
+- `SavedZoomRatio`: the zoom is remembered between levels.
+
+## Game systems (IL2CPP v39 metadata + arm64 call resolution, 2026-11-09)
+`Assembly-CSharp` has 2,630 types, almost all in the global namespace; the game is built on Entitas ECS
+(314 `*System` classes). Calls below were resolved by disassembling each method and naming its `bl` targets
+from the metadata's method addresses; constants are read from the code.
+
+**Special arrow** (`LevelFlags.SpecialArrow`, `Data.SpecialArrowId`)
+- `SpecialArrowInteractionSystem` fires when the special arrow is tapped while free (`TryToMove`, not `Blocked`).
+- It calls `SpecialArrowUtil.SelectChainArrows(grid, special, arrows, maxChain = 5)`: on a copy of the grid it
+  removes the special arrow, then repeatedly picks an arrow that no longer collides (`ArrowGrid.Collides`) and
+  removes it too, up to 5 arrows.
+- Each picked arrow gets an `AutoRemoveTimer` of `ArrowReleaseDelay(i)` = **0.2 s × i** and then leaves by itself.
+  → One tap on the special arrow clears up to 5 more arrows a moment later. The solver must expect those to vanish
+  (this is the "mismatch" seen on level 134).
+
+**Auto-remove** (`ArrowAutoRemoveSystem`, `…QueueSystem`, `…LevelStartSystem`)
+- An arrow with an `AutoRemoveTimer` counts down; when it reaches 0 and the arrow is not `Blocked`, it becomes
+  `AutoRemoving` and moves out on its own. Blocked ones keep waiting.
+- The queue spaces timers **0.1 s** apart. This is how red arrows (tapped while blocked) leave once their way clears.
+
+**Taps** (`ArrowClickSystem`)
+- `pointerClick` → `ArrowInputUtils.GetArrow` (1.0-cell then 2.5-cell rule) → ignored while `isBlockedAfterMistake`
+  → otherwise the arrow is marked `TryToMove`.
+- `ArrowBlockSystem` sets `Blocked`/`BlockingArrow` from `ArrowGrid.Collides`. A blocked `TryToMove` is a mistake.
+
+**Mistakes** (`LivesMistakeSystem`, `RemoveBlockedAfterMistakeSystem`)
+- A mistake takes a life (`ReplaceLives`), fails the level at 0 lives, and creates the `BlockedAfterMistake` entity
+  with a **0.35 s** timer: **all taps are ignored for 0.35 s after a mistake.**
+
+**Hint** (`HintSystem`)
+- Picks from the game's own `_freeArrows` group, spends a hint (wallet), adds `HintAnimation` and **moves the camera**
+  (`ReplaceCameraStage`) to the arrow. `HintBoosterDisabledWhenNoFreeArrowsSystem` greys the button when nothing is free.
+
+**Other gameplay systems**
+- `ArrowGuidelineShowOnHoldSystem` / `…ToggleOnHoldSystem`: holding an arrow draws its exit path; the
+  "keep guidelines" choice is saved (`ArrowGuidelinesStaySavegame`).
+- `ComboSystem`: arrows cleared within `ComboInterval` of each other build a combo (colour effect only).
+- `SlomoSystem`: a developer key (`Input.GetKey`) sets `Time.timeScale` between 1 and 4; not reachable on a phone.
+- `PenToolGuideLineSystem`, `PenTutorial*`: a pen tool that draws a guide line; its tutorial opens after a mistake.
+- `ArrowLevelBoundsSystem`: level bounds from all arrow points (feeds the camera's pan bounds).
+- `CameraRevealLevelShapeStageSystem`: the intro reveal of the level shape.
+- Level kinds: `LevelFlags` = Shape, Color, Blob, Snowflake, Thunder, Removed, Abstract, Onboarding, SpecialArrow,
+  Splat, Diagonal, MirroredVertical, MirroredHorizontal; difficulty strings Hard, SuperHard, Nightmare.
+
+**Not gameplay** (most of the 314 systems): ads (AppLovin MAX, Facebook, interstitial and rewarded flow, forced ads,
+banner), IAP (no-ads, hints, streak freezes), Firebase/Singular analytics and experiments, remote config, cloud save,
+leagues and Thunder Rush (server `/api/v1/ThunderRush`), daily challenges and streaks, awards, notifications.
+
 ## Screen colours (1080×2400 Nothing Phone 1, dark mode)
 | What | RGB |
 |---|---|
