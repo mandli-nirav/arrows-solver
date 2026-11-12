@@ -147,9 +147,8 @@ export default function App() {
 
   const steps: [IconName, string][] = [
     ['touch_app', 'Start a level, then tap the accessibility button. The drawer slides down from the top.'],
-    ['troubleshoot', 'Analyze reads the level. Green arrows can leave now, orange ones are blocked.'],
-    ['play_arrow', 'Solve clears it one arrow at a time and stops if anything looks wrong.'],
-    ['map', 'Analyze also zooms out and centres the board. Map shows the whole level.'],
+    ['play_arrow', 'Tap Solve. It zooms out, centres the board, reads the level and clears it, stopping if anything looks wrong.'],
+    ['map', 'Dark green arrows go first, lighter ones later. Map shows the whole level.'],
   ];
 
   const IconButton = ({icon, label, onPress}: {icon: IconName; label: string; onPress: () => void}) => (

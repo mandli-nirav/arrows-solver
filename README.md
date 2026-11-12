@@ -1,7 +1,7 @@
 # Arrows Solver
 
 An open-source Android helper for the puzzle game **Arrows – Puzzle Escape** (`com.ecffri.arrows`).
-A floating bubble sits over the game. **Analyze** reads the level from the screen; **Solve** clears it one arrow at a time
+A Material 3 drawer opens over the game from the accessibility button. **Solve** reads the level from the screen and clears it one arrow at a time
 and stops the moment anything looks wrong, so it never spends your lives.
 
 > Unofficial fan project. Not affiliated with, endorsed by or connected to the game's developer.
@@ -12,7 +12,7 @@ and stops the moment anything looks wrong, so it never spends your lives.
 for safety. See [Known issues](#known-issues). Contributions are welcome.
 
 ## How it works
-- **Accessibility service** (`SolverService.kt`): the floating bubble and panel (`TYPE_ACCESSIBILITY_OVERLAY`, no "draw over apps"
+- **Accessibility service** (`SolverService.kt`): the top drawer, status pill and plan drawing (`TYPE_ACCESSIBILITY_OVERLAY`, no "draw over apps"
   permission), screenshots via `takeScreenshot` (Android 11+), taps and two-finger pans/pinches via `dispatchGesture`.
 - **Vision** (`Vision.kt`): finds the cell grid from line projections, reads lines, arrowheads and the "emptied" dots,
   and stitches panned screenshots together.
@@ -41,17 +41,17 @@ cd android
 ./gradlew assembleRelease                             # Windows: gradlew.bat assembleRelease
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
-Then open **Arrows Solver**, turn on **Bubble service** (Settings → Accessibility). If the switch is greyed out, open App info →
-⋮ → *Allow restricted settings* first.
+Then open **Arrows Solver**, turn on **Solver service** and its **shortcut** (Settings → Accessibility). If the switch is
+greyed out, open App info → ⋮ → *Allow restricted settings* first.
 
 ## Use
-1. Start a level in Arrows and tap the blue bubble.
-2. **Analyze**: green arrows can leave now, orange are blocked. **Map** shows the whole level.
-3. **Solve**. Keep your hands off the screen while it runs (a touch cancels its gestures). **Stop** works at any time.
+1. Start a level in Arrows and tap the accessibility button; the drawer slides down from the top.
+2. **Solve**: it zooms out, centres, reads the level, then clears it. Dark green arrows go first, lighter ones later.
+   **Map** shows the whole level. Keep your hands off the screen while it runs; **Stop** appears while it runs.
 
 ## Known issues
-- On some Super Hard boards Solve stops with "Screen doesn't match the plan" because one arrow on screen sits one row away from the
-  level data (see the end of [PROGRESS.md](PROGRESS.md)). The special arrow (`SpecialArrowId`) may behave differently. Needs investigation.
+- Special arrows (shown from the 16th level on, about 1 level in 5) send up to 5 more arrows out by themselves; the solver
+  expects that chain (see [docs/GAME_INTERNALS.md](docs/GAME_INTERNALS.md)) but it has not been tested on a level with one yet.
 - The game zooms out to at most 27 cells across on a 9:20 phone, so wide boards need panning; panning near the end of a level is
   the least reliable part.
 - Colours and the left edge-handle area were measured on a Nothing Phone (1). Other phones, light mode and other themes are untested.

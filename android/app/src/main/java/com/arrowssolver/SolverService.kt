@@ -46,7 +46,7 @@ class SolverService : AccessibilityService(), Device {
 
         const val GAME = "com.ecffri.arrows"
         @Volatile var instance: SolverService? = null; private set
-        @Volatile var lastStatus: String = "Ready. Start a level, then tap Analyze or Solve."; private set
+        @Volatile var lastStatus: String = "Ready. Start a level, then tap Solve."; private set
         private val IGNORE = setOf("com.android.systemui", "android")
     }
 
@@ -61,10 +61,13 @@ class SolverService : AccessibilityService(), Device {
     private lateinit var wm: WindowManager
     private val levelDb by lazy { runCatching { assets.open("levels.bin").use { LevelDb.load(it) } }.getOrNull() }
     private val engine by lazy { Engine(this) { levelDb } }
+    /** The drawer window: a scrim over the screen with the drawer card at the top. */
     private var panel: View? = null
+    private var panelCard: View? = null
+    private var panelScrim: View? = null
     private var panelLp: WindowManager.LayoutParams? = null
     private var statusView: TextView? = null
-    /** While Analyze/Solve/Center runs: spinner + live status at the bottom centre (the strip our touches never reach). */
+    /** While Solve runs: spinner + live status at the bottom centre (the strip our touches never reach). */
     private var busyPill: View? = null
     private var busyText: TextView? = null
     private var planView: PlanView? = null
@@ -168,7 +171,6 @@ class SolverService : AccessibilityService(), Device {
         return com.google.android.material.color.DynamicColors.wrapContextIfAvailable(base)
     }
 
-    private var analyzeBtn: View? = null
     private var solveBtn: View? = null
     private var stopBtn: View? = null
 
@@ -196,8 +198,7 @@ class SolverService : AccessibilityService(), Device {
         d.findViewById<View>(R.id.content).setPadding(dp(16), safeArea().top + dp(8), dp(16), 0)
         d.findViewById<View>(R.id.close).setOnClickListener { setPanel(false) }
         d.findViewById<View>(R.id.handle).setOnClickListener { setPanel(false) }
-        analyzeBtn = d.findViewById<View>(R.id.analyze).apply { setOnClickListener { setPanel(false); launch { engine.analyze() } } }
-        solveBtn = d.findViewById<View>(R.id.solve).apply { setOnClickListener { setPanel(false); launch { engine.solve() } } }
+        solveBtn = d.findViewById<View>(R.id.solve).apply { setOnClickListener { setPanel(false); launch { engine.analyze() && engine.solve() } } }
         stopBtn = d.findViewById<View>(R.id.stop).apply { setOnClickListener { stop = true; status("Stopping…") } }
         val holder = d.findViewById<android.widget.FrameLayout>(R.id.mapHolder)
         val map = MapView(holder.context).also { holder.addView(it) }
@@ -208,12 +209,12 @@ class SolverService : AccessibilityService(), Device {
             isChecked = mapShown
             setOnClickListener {
                 mapShown = isChecked
-                if (mapShown && engine.board == null) status("Tap Analyze first, then Map shows the whole level")
+                if (mapShown && engine.board == null) status("Map shows the whole level once Solve has read it")
                 if (!running.get()) mapView?.drawing = engine.mapDrawing()
                 refresh()
             }
         }
-        panel = d
+        panelCard = d
         showStatus(lastStatus)
 
         val pill = inf.inflate(R.layout.busy_pill, null)
@@ -225,20 +226,33 @@ class SolverService : AccessibilityService(), Device {
             y = (resources.displayMetrics.heightPixels * 0.025).toInt()
         })
 
-        panelLp = overlayLp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT, true)
-        wm.addView(d, panelLp)
+        // a dim scrim under the drawer: a touch outside the drawer closes it and never reaches the game
+        val scrim = View(themed()).apply {
+            setBackgroundColor(0x66000000); contentDescription = "Close drawer"
+            setOnClickListener { setPanel(false) }
+        }
+        panelScrim = scrim
+        val root = android.widget.FrameLayout(themed())
+        root.addView(scrim, android.widget.FrameLayout.LayoutParams(-1, -1))
+        root.addView(d, android.widget.FrameLayout.LayoutParams(-1, -2))
+        panel = root
+        panelLp = overlayLp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, true)
+        wm.addView(root, panelLp)
     }
 
     /** Opens or closes the top drawer, sliding it down from the top edge (or back up). */
     private fun setPanel(open: Boolean) {
-        val d = panel ?: return
+        val d = panelCard ?: return
+        val scrim = panelScrim ?: return
         if (open == panelOpen) return
         panelOpen = open
         if (open) {
             refresh()
-            d.translationY = -dp(240).toFloat(); d.alpha = 0f
+            d.translationY = -dp(240).toFloat(); d.alpha = 0f; scrim.alpha = 0f
             d.animate().translationY(0f).alpha(1f).setDuration(260).setInterpolator(android.view.animation.DecelerateInterpolator(2f)).start()
+            scrim.animate().alpha(1f).setDuration(260).start()
         } else {
+            scrim.animate().alpha(0f).setDuration(200).start()
             d.animate().translationY(-d.height.toFloat()).alpha(0f).setDuration(200).withEndAction { refresh() }.start()
         }
     }
@@ -280,7 +294,7 @@ class SolverService : AccessibilityService(), Device {
         // while something runs only Stop is offered; otherwise the actions
         val busy = running.get()
         stopBtn?.visibility = if (busy) View.VISIBLE else View.GONE
-        listOfNotNull(analyzeBtn, solveBtn).forEach { it.visibility = if (busy) View.GONE else View.VISIBLE }
+        listOfNotNull(solveBtn).forEach { it.visibility = if (busy) View.GONE else View.VISIBLE }
         busyPill?.visibility = if (show && running.get()) View.VISIBLE else View.GONE
         planView?.visibility = if (show && planShown && planView?.drawing != null) View.VISIBLE else View.GONE
         mapHolder?.visibility = if (mapShown && mapView?.drawing != null) View.VISIBLE else View.GONE
@@ -360,7 +374,7 @@ class SolverService : AccessibilityService(), Device {
     override fun overlayRects(): List<Rect> {
         val out = ArrayList<Rect>()
         onMain {
-            for (v in listOfNotNull(panel)) {
+            for (v in listOfNotNull(panelCard?.takeIf { panel?.visibility == View.VISIBLE })) {
                 if (v.visibility != View.VISIBLE || !v.isAttachedToWindow) continue
                 val loc = IntArray(2); v.getLocationOnScreen(loc)
                 out.add(Rect(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height))

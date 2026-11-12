@@ -165,7 +165,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         val extra = (if (removed.isNotEmpty()) " (${removed.size} already cleared)" else "") +
             (if (pending.isNotEmpty()) ", ${pending.size} red waiting" else "")
         dev.status("${label.replaceFirstChar { it.uppercase() }}: $left arrows left$extra, ${layers.size} rounds. " +
-            "${layers[0].size} can go now (dark green; lighter = later rounds). Tap Solve.")
+            "${layers[0].size} can go now (dark green; lighter = later rounds).")
         return true
     }
 
@@ -615,7 +615,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             if (moved == null) break // too small to drag, or the game won't pan further
         }
         startWide = 16 // the camera moved: Solve re-finds the board over a wide area
-        dev.status("Centred and zoomed out. Tap Analyze or Solve.")
+        dev.status("Centred and zoomed out.")
         return true
     }
 
