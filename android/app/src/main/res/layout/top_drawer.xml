@@ -57,17 +57,6 @@
                 app:iconTint="?attr/colorOnErrorContainer" app:iconGravity="textStart" app:iconSize="20dp" app:iconPadding="6dp" />
         </LinearLayout>
 
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="4dp" android:gravity="center_vertical" android:orientation="horizontal">
-            <com.google.android.material.chip.Chip android:id="@+id/map" style="@style/Widget.Material3.Chip.Filter"
-                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Map"
-                app:chipIcon="@drawable/ms_map" app:chipIconVisible="true" />
-        </LinearLayout>
-
-        <!-- whole-level map: small, view only (Map chip) -->
-        <FrameLayout android:id="@+id/mapHolder" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="8dp" android:background="@drawable/map_bg" android:padding="8dp"
-            android:visibility="gone" />
 
         <!-- drag handle (Material 3 sheet style); tapping it closes the drawer -->
         <FrameLayout android:id="@+id/handle" android:layout_width="match_parent" android:layout_height="24dp"

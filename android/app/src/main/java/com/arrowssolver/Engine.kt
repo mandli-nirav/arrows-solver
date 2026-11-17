@@ -13,6 +13,11 @@ interface Device {
     val stopRequested: Boolean
     fun capture(lineColor: Int?): Shot?
     fun tap(x: Float, y: Float): Boolean
+    /**
+     * Single taps at [points], one after another in one gesture, [gapMs] apart (never overlapping, so the game sees
+     * one finger at a time). Saves the round trip of a separate gesture per tap.
+     */
+    fun taps(points: List<Pair<Float, Float>>, gapMs: Long): Boolean
     fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long): Boolean
     /** Two fingers at once: a from (ax0,ay0) to (ax1,ay1), b from (bx0,by0) to (bx1,by1). */
     fun pinch(ax0: Float, ay0: Float, ax1: Float, ay1: Float, bx0: Float, by0: Float, bx1: Float, by1: Float, ms: Long): Boolean
@@ -21,12 +26,10 @@ interface Device {
     fun showPlan(d: PlanDrawing?)
     /** We are dragging the board by (dx, dy) px over [ms]: move the drawing along with it. */
     fun boardShift(dx: Float, dy: Float, ms: Long)
-    /** Arrow [id] was tapped: animate it leaving like the game's (cells tail..head, head direction). */
-    fun arrowLeaving(id: Int, cells: FloatArray, dx: Int, dy: Int)
+    /** Arrow [id] is tapped in [delayMs]: animate it leaving like the game's (cells tail..head, head direction). */
+    fun arrowLeaving(id: Int, cells: FloatArray, dx: Int, dy: Int, delayMs: Long = 0)
     /** True when screenshots contain only the game window, so our overlays can stay visible while solving. */
     val overlaysHiddenFromCapture: Boolean
-    /** Whole-level mini-map drawn by the app (the game can't zoom out far enough for wide boards). */
-    fun showMap(d: MapDrawing?)
     /** Debug trail: frames + numbers saved on the phone (Android/data/<pkg>/files/debug). */
     fun debugBegin()
     fun debug(msg: String)
@@ -39,7 +42,6 @@ interface Device {
 class PlanDrawing(val ids: IntArray, val paths: List<Pair<FloatArray, Int>>, val ox: Float, val oy: Float, val sx: Float, val sy: Float)
 
 /** Board-space drawing of the whole level: w x h cells, polylines in cell units with colours. */
-class MapDrawing(val w: Int, val h: Int, val paths: List<Pair<FloatArray, Int>>)
 
 private enum class Side { LEFT, RIGHT, TOP, BOTTOM }
 
@@ -63,6 +65,12 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     /** When each arrow was tapped; the emptied-cell dots fade in a moment after an arrow has left. */
     private val tappedAt = HashMap<Int, Long>()
     private var freshCells: Set<Cell> = emptySet()
+    /**
+     * Cells on the way out of arrows tapped in the last 2 s: the straight line from the head past the board edge.
+     * An arrow slides out along it, so a line there is expected and not a mismatch. The arrow's own cells stay checked,
+     * so an ignored tap (the arrow still where it was) is still caught at once.
+     */
+    private var exitCells: Set<Cell> = emptySet()
     /** Solve starts with this wide a board search (set when analysis could not track the camera to the end). */
     private var startWide = 0
     /** Red arrows: tapped while blocked earlier; they leave on their own once free, never tap them. */
@@ -70,6 +78,8 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     /** Free arrows the camera can't bring into tapping range (dragging toward them doesn't move the board). */
     private val unreachable = HashSet<Int>()
     private var panTarget = -1
+    /** The last arrow the board was nudged for while it was already on screen (see [panToward]). */
+    private var nudged = -1
     /**
      * Every move, worked out at Analyze: rounds of arrows that can leave together (round 0 = free now). Kept in memory
      * only while this level is solved, and dropped when it is done ([forget]).
@@ -79,8 +89,6 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
 
     /** The level's special arrow (LevelData.SpecialArrowId), or -1. Tapping it sends up to 5 more arrows out. */
     private var specialId = -1
-    /** The special arrow is really on this board (its cells are drawn in the special colours, see [analyze]). */
-    private var specialSeen = false
     /** Until then, arrows that vanish after the special arrow was tapped are its chain (see [chainGone]). */
     private var chainUntil = 0L
     private var prePan: Pair<Int, Int>? = null
@@ -91,7 +99,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     private class Cam(var shot: Shot, var l: Lattice, var ci: Int, var cj: Int)
 
     fun analyze(attempt: Int = 0): Boolean {
-        board = null; everCells = null; specialId = -1; specialSeen = false; chainUntil = 0; tappedAt.clear(); freshCells = emptySet(); removed.clear(); dontCare.clear(); pending.clear(); unreachable.clear(); prePan = null; dev.showPlan(null); dev.debugBegin()
+        board = null; everCells = null; specialId = -1; chainUntil = 0; tappedAt.clear(); freshCells = emptySet(); removed.clear(); dontCare.clear(); pending.clear(); unreachable.clear(); prePan = null; dev.showPlan(null); dev.debugBegin()
         dev.status("Reading the screen\u2026")
         // Start from the reset view: zoomed out as far as the game allows and the board in the middle (fewer pans)
         if (attempt == 0 && !center()) return false
@@ -154,18 +162,16 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         setRounds(layers)
         board = b; lat = cam.l
         learnDontCare(b, cam.shot, cam.l)
-        // LevelData.SpecialArrowId is set on most levels, but SpecialArrowUtil.LevelHasSpecialArrow shows it only from the
-        // 16th level on, for ~1 level in 5 picked by a per-player hash. When shown it is drawn in the special colours,
-        // so its cells don't look like a normal arrow and land in dontCare.
-        specialSeen = specialId in b.arrows.indices && b.arrows[specialId].cells.any { it in dontCare }
-        dev.debug("special arrow id=$specialId seen=$specialSeen")
+        // LevelData.SpecialArrowId is set on most levels; SpecialArrowUtil.LevelHasSpecialArrow shows it only from the
+        // 16th level on, for ~1 level in 5 picked by a per-player hash. It can't be told apart on screen reliably
+        // (14 and 15 Nov: read as a plain arrow, then its chain ran), so it is always handled as live: see [solve].
+        dev.debug("special arrow id=$specialId")
         dev.showPlan(drawing(b, cam.l, di, dj))
-        dev.showMap(mapDrawing())
         val left = b.arrows.size - removed.size
         val extra = (if (removed.isNotEmpty()) " (${removed.size} already cleared)" else "") +
             (if (pending.isNotEmpty()) ", ${pending.size} red waiting" else "")
         dev.status("${label.replaceFirstChar { it.uppercase() }}: $left arrows left$extra, ${layers.size} rounds. " +
-            "${layers[0].size} can go now (dark green; lighter = later rounds).")
+            "${layers[0].size} can go now (green).")
         return true
     }
 
@@ -266,6 +272,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         var lastTaps = emptyList<Int>()
         val t0 = System.currentTimeMillis()
         var heartLow = 0
+        var prevAt: Pair<Lattice, Loc>? = null // the last frame's grid and board position
         while (true) {
             if (dev.stopRequested) return fail("Stopped (${removed.size}/${b.arrows.size} cleared)")
             val occ = b.occupancy(removed)
@@ -278,6 +285,10 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             val s = dev.capture(lineColor) ?: return fail("Screenshot failed")
             val now = System.currentTimeMillis()
             freshCells = tappedAt.filterValues { now - it < 1500 }.keys.flatMapTo(HashSet()) { b.arrows[it].cells }
+            exitCells = tappedAt.filterValues { now - it < 2000 }.keys.flatMapTo(HashSet()) { id ->
+                val a = b.arrows[id]
+                generateSequence(a.head + a.dir) { it + a.dir }.take(b.maxC - b.minC + b.maxR - b.minR + 8).asIterable()
+            }
             if (heartBase == 0 && !s.heartsHidden) heartBase = s.heartPx
             if (!s.heartsHidden && heartBase > 300 && s.heartPx < heartBase * 0.85) {
                 // confirm on the next frame (no tap in between): one odd frame must not end the run
@@ -294,14 +305,21 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
                 val ej = dj - ((cur.ay - nl.ay) / cur.q).roundToInt()
                 locate(b, occ, view, ei, ej, 2 + wide, 2 + wide)
             }
-            if (loc != null && view != null && loc.bad > 0 && now < chainUntil) {
+            // Still = same grid phase AND same board position as the frame before. The phase alone repeats every cell
+            // (a 160 px pan is exactly 4 cells), and a frame taken while the camera glides after a pan must neither
+            // be tapped on nor change the model (17 Nov: a stolen tap read on such a frame as "already cleared").
+            val still = nl != null && loc != null && prevAt.let { pa ->
+                pa != null && abs(nl.ax - pa.first.ax) <= 1.0 && abs(nl.ay - pa.first.ay) <= 1.0 && pa.second.di == loc.di && pa.second.dj == loc.dj
+            }
+            prevAt = if (nl != null && loc != null) Pair(nl, loc) else null
+            if (still && loc != null && view != null && loc.bad > 0 && now < chainUntil) {
                 val gone = chainGone(b, view, loc.di, loc.dj)
                 if (gone.isNotEmpty()) { removed.addAll(gone); gone.forEach { tappedAt[it] = now }; dev.debug("special arrow chain took $gone"); continue }
             }
             // Arrows cleared before we started can turn up later as emptied dots. Accept that only when the board
             // position is unambiguous AND, with those arrows removed, every visible cell then matches exactly:
             // wrongly dropping a present arrow could make a blocked arrow look free and cost a life.
-            if (loc != null && view != null && loc.bad > 0 && loc.secondBad >= loc.bad + 20) {
+            if (still && loc != null && view != null && loc.bad > 0 && loc.secondBad >= loc.bad + 20) {
                 val gone = vanished(b, view, loc.di, loc.dj)
                 if (gone.isNotEmpty()) {
                     val trial = HashSet(removed).apply { addAll(gone) }
@@ -322,7 +340,7 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             if (nl == null || loc == null || loc.bad > 0) {
                 // The game ignores taps made while the camera still glides (InputUiView: isIgnoreClick = isCameraMoving).
                 // If the only difference is the arrow we just tapped, still sitting there unchanged, tap it again.
-                if (loc != null && view != null && lastTaps.isNotEmpty() && retries >= 2) {
+                if (still && loc != null && view != null && lastTaps.isNotEmpty() && retries >= 2) {
                     val extra = view.node.filter { (k, o) -> o.v && Cell(k.c + loc.di, k.r + loc.dj) !in occ && Cell(k.c + loc.di, k.r + loc.dj) !in dontCare }
                         .keys.map { Cell(it.c + loc.di, it.r + loc.dj) }.toSet()
                     val missing = view.node.count { (k, o) -> !o.v && Cell(k.c + loc.di, k.r + loc.dj) in occ && Cell(k.c + loc.di, k.r + loc.dj) !in dontCare }
@@ -364,13 +382,12 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
                 sleep(150); continue
             }
             if (loc.secondBad <= 2) return fail("Can't tell exactly where the board is — stopped for safety")
-            // the camera must hold still between two frames, or the game would ignore the tap
-            val moving = abs(nl.ax - cur.ax) > 1.0 || abs(nl.ay - cur.ay) > 1.0
             retries = 0; wide = 0
             lat = nl; di = loc.di; dj = loc.dj
             // live colours over the game's arrows, only when our overlays can't confuse the screenshots
             if (dev.overlaysHiddenFromCapture) dev.showPlan(drawing(b, nl, di, dj)) else dev.showPlan(null)
-            if (moving) { sleep(150); continue }
+            // the camera must hold still between two frames, or the game would ignore the tap
+            if (!still) { sleep(150); continue }
             prePan?.let { if (it == Pair(di, dj) && panTarget >= 0) { unreachable.add(panTarget); dev.debug("drag didn't move the board; skipping arrow $panTarget for now") } }
             prePan = null
             // a red (waiting) arrow slides out by itself as soon as its way is clear
@@ -381,37 +398,54 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             // Up to 5 taps per checked frame. The game drops a tapped arrow from its grid at once, so the others stay
             // free; after the first, only cells with no other arrow within 1.5 cells, so a slightly-off touch can't
             // reach a neighbour.
+            // Every tap in a batch keeps 1.5 cells from any other free arrow (ArrowInputUtils takes the closest arrow
+            // within 1 cell): no free neighbour can take it, so no later tap ever aims at an arrow that is already gone.
+            // A tap that is gone hands its touch to the nearest arrow, which may be blocked: that is a lost heart
+            // (level 268: a first tap 1 cell from a free arrow was taken by it, the next tap then hit blocked arrow 96).
+            // When no cell has that room, a single tap goes alone: if a free neighbour takes it, that is harmless.
+            // At most 8 taps: the game may re-centre its camera mid-batch, and fewer taps then land in the wrong place.
             val batch = ArrayList<Tap>()
-            while (batch.size < 12 && batch.none { specialSeen && it.arrow == specialId }) {
+            while (batch.size < 8 && batch.none { it.arrow == specialId }) {
                 // free now or freed by this batch: only those can take a touch meant for another arrow
                 val stealers = b.free(HashSet(removed).apply { batch.forEach { add(it.arrow) } }).mapTo(HashSet()) { it.id }
                 val rest = free.filter { f -> batch.none { it.arrow == f.id } }
-                val next = chooseTap(b, rest, occ, s, nl, stealers, if (batch.isEmpty()) 0.0 else 1.5) ?: break
-                if (specialSeen && next.arrow == specialId && batch.isNotEmpty()) break // the special arrow goes alone, next round
+                val next = chooseTap(b, rest, occ, s, nl, stealers, 1.5)
+                    ?: (if (batch.isEmpty()) chooseTap(b, rest, occ, s, nl, stealers, 0.0) else null)
+                    ?: break
+                // the special arrow goes alone, next round: its chain may take an arrow a later tap aims at, and that
+                // touch then lands on the nearest arrow, maybe a blocked one (14 and 15 Nov: two lost hearts)
+                if (next.arrow == specialId && batch.isNotEmpty()) break
                 batch.add(next)
+                if (next.room < 1.5) break // a tap a free neighbour could take goes alone
             }
             if (batch.isEmpty()) {
                 prePan = Pair(di, dj)
-                val moved = panToward(s, nl, free) ?: return fail("The free arrows are out of reach (off-screen, and the board won't pan there)")
+                val moved = panToward(s, nl, free) ?: run {
+                    if (reanalysed) return fail("The free arrows are out of reach (off-screen, and the board won't pan there)")
+                    reanalysed = true
+                    dev.debug("no free arrow can be reached; reading the board again")
+                    if (!analyze()) return false
+                    b = board ?: return false
+                    continue
+                }
                 wide = (maxOf(abs(moved.first), abs(moved.second)) / nl.p).roundToInt() * 2 + 4
-                sleep(500); continue
+                sleep(150); continue
             }
             dev.status("Clearing ${removed.size + batch.size}/${b.arrows.size}…")
             unreachable.clear() // the board changed: earlier unreachable arrows may be fine now
+            // One gesture for the whole batch, taps TAP_GAP apart: the game handles one click per frame and needs
+            // one finger at a time (InputUiView: fingerCount), so taps never overlap but need no round trip each.
+            val t0 = System.currentTimeMillis()
             for ((n, t) in batch.withIndex()) {
-                // back-to-back taps land in one game frame as two fingers, and the game ignores both
-                if (n > 0) sleep(90)
-                if (!dev.tap(t.x, t.y)) return fail("Tap was rejected")
-                removed.add(t.arrow)
-                tappedAt[t.arrow] = System.currentTimeMillis()
-                b.arrows[t.arrow].let { dev.arrowLeaving(it.id, cellsOf(it), it.dir.dx, it.dir.dy) }
+                b.arrows[t.arrow].let { dev.arrowLeaving(it.id, cellsOf(it), it.dir.dx, it.dir.dy, n * TAP_GAP) }
                 dev.debug("tap ${t.arrow} at ${t.cell} px=(${t.x.roundToInt()},${t.y.roundToInt()}) room=${"%.2f".format(t.room)} at=($di,$dj)")
             }
+            if (!dev.taps(batch.map { it.x to it.y }, TAP_GAP)) return fail("Tap was rejected")
+            for ((n, t) in batch.withIndex()) { removed.add(t.arrow); tappedAt[t.arrow] = t0 + n * TAP_GAP }
             lastTaps = batch.map { it.arrow }
-            dev.showMap(mapDrawing())
-            // If the special arrow was tapped (seen or not), arrows that vanish soon after may be its chain
-            if (batch.any { it.arrow == specialId }) chainUntil = System.currentTimeMillis() + 4500
-            if (specialSeen && batch.any { it.arrow == specialId }) {
+            // If the special arrow was tapped, arrows that vanish soon after may be its chain
+            if (batch.any { it.arrow == specialId }) {
+                chainUntil = System.currentTimeMillis() + 4500
                 // SpecialArrowUtil: up to 5 more arrows leave by themselves, 0.2 s apart; let them go before looking
                 dev.status("Special arrow: letting its chain clear…")
                 sleep(1800)
@@ -444,12 +478,16 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
 
     /** After a level: keep nothing (no board, no model, no drawings). */
     private fun forget() {
-        board = null; everCells = null; lat = null; specialId = -1; specialSeen = false; chainUntil = 0; rounds = emptyList(); roundOf.clear()
-        removed.clear(); dontCare.clear(); pending.clear(); unreachable.clear(); tappedAt.clear(); freshCells = emptySet()
-        dev.showPlan(null); dev.showMap(null)
+        board = null; everCells = null; lat = null; specialId = -1; chainUntil = 0; rounds = emptyList(); roundOf.clear()
+        removed.clear(); dontCare.clear(); pending.clear(); unreachable.clear(); tappedAt.clear(); freshCells = emptySet(); exitCells = emptySet()
+        dev.showPlan(null)
     }
 
-    private companion object { const val ZOOMED = "zoom changed" }
+    private companion object {
+        const val ZOOMED = "zoom changed"
+        /** Time between the starts of two taps in one batch (each tap is down for 40 ms). */
+        const val TAP_GAP = 100L
+    }
 
     private data class Loc(val di: Int, val dj: Int, val bad: Int, val secondBad: Int)
 
@@ -460,10 +498,10 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         for ((k, o) in v.node) {
             val g = Cell(k.c + a, k.r + c)
             if (g in dontCare) continue
-            if (o.v != (g in occ)) bad++
+            if (o.v != (g in occ)) { if (!(o.v && g in exitCells)) bad++ }
             // emptied-cell dots mark exactly the cells where arrows used to be: a fingerprint of the level
             else if (!o.v) {
-                if (ec != null) { if ((v.dot[k] == true) != (g in ec) && g !in freshCells) bad++ }
+                if (ec != null) { if (v.dot[k] == true && g !in ec) bad++ }
                 else if (v.dot[k] == true && !b.inBounds(g)) bad++
             }
         }
@@ -506,7 +544,8 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             val sx = l.px(x.c - di); val sy = l.py(x.r - dj)
             val edge = maxOf(14.0, 0.35 * l.p)
             if (sx < edge || sx > s.w - edge || sy < s.top + 0.5 * l.q || sy > s.tapBottom - 0.5 * l.q) continue
-            if (rects.any { it.contains(sx, sy) } || s.uiCount(sx - ui, sy - ui, sx + ui, sy + ui) > 0) continue
+            // the faint edges of lines can blend into the UI colour (#424768): a few pixels are not a button
+            if (rects.any { it.contains(sx, sy) } || s.uiCount(sx - ui, sy - ui, sx + ui, sy + ui) > 4) continue
             if (Parser.inEdgeHandle(s, sx, sy, l.p)) continue
             var room = 99.0 // nothing within 3 cells
             for (dc in -3..3) for (dr in -3..3) {
@@ -560,7 +599,16 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
             else -> 0.0
         }
         // on screen but hidden by the panel or the '#' button: nudge it toward the middle
-        if (dx == 0.0 && dy == 0.0) dy = if (by < cy) 4 * l.q else -4 * l.q
+        if (dx == 0.0 && dy == 0.0) {
+            // on screen but not tappable twice in a row: nudging again would only go back and forth
+            if (panTarget == nudged) {
+                unreachable.add(panTarget); nudged = -1
+                dev.debug("arrow $panTarget is on screen but can't be tapped; skipping it for now")
+                return Pair(0f, 0f)
+            }
+            nudged = panTarget
+            dy = if (by < cy) 4 * l.q else -4 * l.q
+        }
         dev.debug("panToward target=(${bx.toInt()},${by.toInt()}) d=(${dx.toInt()},${dy.toInt()})")
         return drag(s, l, dx.toFloat(), dy.toFloat())
     }
@@ -582,14 +630,14 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         if (len < 2f * l.p) return null
         val gap = max(90f, 1.5f * l.p.toFloat())
         val ox = if (ux != 0f) 0f else gap / 2; val oy = if (ux != 0f) gap / 2 else 0f
-        dev.boardShift(ux * len, uy * len, 900)
+        dev.boardShift(ux * len, uy * len, 500)
         val ok = dev.pinch(
             x0 - ox, y0 - oy, x0 - ox + ux * len, y0 - oy + uy * len,
-            x0 + ox, y0 + oy, x0 + ox + ux * len, y0 + oy + uy * len, 900,
+            x0 + ox, y0 + oy, x0 + ox + ux * len, y0 + oy + uy * len, 500,
         )
         dev.debug("2-finger drag from (${x0.toInt()},${y0.toInt()}) by (${(ux * len).toInt()},${(uy * len).toInt()}) ok=$ok")
         if (!ok) return null
-        sleep(700) // let the camera settle
+        sleep(250) // the camera must still settle; callers wait for two still frames before tapping
         return Pair(ux * len, uy * len)
     }
 
@@ -638,8 +686,11 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     fun zoomOutFully(): Boolean {
         dev.status("Zooming out\u2026")
         var (s, l) = settle() ?: return false
+        // the game's widest view is 27 cells across (CameraZoomUtility: orthographic size 30)
+        fun zoomedOut(p: Double) = p <= s.w / 26.5
         for (i in 0 until 4) {
             if (dev.stopRequested) return fail("Stopped")
+            if (zoomedOut(l.p)) break
             val band = (s.tapBottom - s.top).toFloat()
             val cx = s.w / 2f; val y1 = s.top + 0.12f * band; val y2 = s.tapBottom - 0.12f * band; val ym = (y1 + y2) / 2
             val ok = dev.pinch(
@@ -657,7 +708,6 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         return true
     }
 
-    /** Whole level for the mini-map: green = can go now, orange = blocked, red = waiting (tapped while blocked). */
     // ---- live overlay tracking (between runs) ----
     private var tLat: Lattice? = null
     private var tDi = 0
@@ -691,16 +741,6 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
         return drawing(b, nl, loc.di, loc.dj)
     }
 
-    fun mapDrawing(): MapDrawing? {
-        val b = board ?: return null
-        val now = roundsNow()
-        val paths = b.arrows.filter { it.id !in removed }.map { a ->
-            val pts = FloatArray(a.cells.size * 2)
-            a.cells.forEachIndexed { k, x -> pts[2 * k] = (x.c - b.minC).toFloat(); pts[2 * k + 1] = (x.r - b.minR).toFloat() }
-            Pair(pts, colorOf(a.id, now))
-        }
-        return MapDrawing(b.maxC - b.minC + 1, b.maxR - b.minR + 1, paths)
-    }
 
     private fun setRounds(layers: List<List<Int>>) {
         rounds = layers; roundOf.clear()
@@ -708,16 +748,15 @@ class Engine(private val dev: Device, private val levelDb: () -> LevelDb?) {
     }
 
     /**
-     * Colour by round of the plan: round 0 (can go now) dark green, later rounds lighter green, red = waiting (tapped
-     * while blocked earlier). Rounds are re-worked from what is left, so the colours stay right as arrows leave.
+     * Only what matters now is coloured: arrows that can leave now are green, waiting arrows (tapped while blocked
+     * earlier) red; every other arrow is left exactly as the game draws it (transparent here). Rounds are re-worked
+     * from what is left, so the green moves on as arrows leave.
      */
     private fun roundsNow(): List<List<Int>> = board?.plan(removed) ?: rounds
 
     private fun colorOf(id: Int, now: List<List<Int>>): Int {
         if (id in pending) return 0xFFFF4B5D.toInt()
-        val k = now.indexOfFirst { id in it }.coerceAtLeast(0)
-        val t = if (now.size <= 1) 0f else k.toFloat() / (now.size - 1)
-        return android.graphics.Color.HSVToColor(floatArrayOf(140f, 0.85f - 0.55f * t, 0.55f + 0.42f * t))
+        return if (now.firstOrNull()?.contains(id) == true) 0xFF3DDC84.toInt() else 0x00000000
     }
 
     private fun cellsOf(a: Arrow) = FloatArray(a.cells.size * 2).also { p ->

@@ -12,6 +12,8 @@ import kotlin.math.roundToInt
 /** Board band as a fraction of screen height: hearts/progress header above, nav bar below. */
 const val BAND_TOP = 0.16
 const val BAND_BOTTOM = 0.955
+/** Bottom of the game's top bar (title, hearts, Hint, progress bar): our drawing stays below it, like the game's board. */
+const val TOP_BAR = 0.14
 /**
  * Taps and pan/zoom fingers stay above this (just over the '#' row), so the strip below is a safe place for the
  * floating accessibility button: no touch of ours can land on it. Arrows lower down are panned up first.
@@ -268,7 +270,9 @@ object Parser {
             if (x < m || x >= s.w - m || y < s.top + m || y >= s.bottom - m) return false
             if (ex.any { it.contains(x, y) }) return false
             if (inEdgeHandle(s, x, y, p)) return false
-            return s.uiCount(x - uiR, y - uiR, x + uiR, y + uiR) == 0
+            // A button puts hundreds of its colour (66,71,104) here. The faint diagonal edges of an arrowhead blend line
+            // and background into that colour too (1..20 px): counting those hid every arrowhead on some boards.
+            return s.uiCount(x - uiR, y - uiR, x + uiR, y + uiR) <= 50
         }
         fun quality(x: Int, y: Int) = min(min(x, s.w - x), min(y - s.top, s.bottom - y)) / p
         val iLo = ceil(-lat.ax / p).toInt(); val iHi = floor((s.w - lat.ax) / p).toInt()

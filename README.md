@@ -46,8 +46,8 @@ greyed out, open App info → ⋮ → *Allow restricted settings* first.
 
 ## Use
 1. Start a level in Arrows and tap the accessibility button; the drawer slides down from the top.
-2. **Solve**: it zooms out, centres, reads the level, then clears it. Dark green arrows go first, lighter ones later.
-   **Map** shows the whole level. Keep your hands off the screen while it runs; **Stop** appears while it runs.
+2. **Solve**: it zooms out, centres, reads the level, then clears it. Green arrows can leave now, red ones are waiting.
+   Keep your hands off the screen while it runs; **Stop** appears while it runs.
 
 ## Known issues
 - Special arrows (shown from the 16th level on, about 1 level in 5) send up to 5 more arrows out by themselves; the solver

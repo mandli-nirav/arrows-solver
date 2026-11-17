@@ -71,9 +71,6 @@ class SolverService : AccessibilityService(), Device {
     private var busyPill: View? = null
     private var busyText: TextView? = null
     private var planView: PlanView? = null
-    private var mapView: MapView? = null
-    private var mapShown = false
-    private var mapHolder: View? = null
     private var inGame = true
     private var panelOpen = false
     /** The plan drawing over the game is always on. */
@@ -175,7 +172,6 @@ class SolverService : AccessibilityService(), Device {
     private var stopBtn: View? = null
 
     private var statusIcon: android.widget.ImageView? = null
-    private var mapChip: com.google.android.material.chip.Chip? = null
 
     private fun buildUi() {
         planView = PlanView(this).also { wm.addView(it, overlayLp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, false)) }
@@ -200,20 +196,6 @@ class SolverService : AccessibilityService(), Device {
         d.findViewById<View>(R.id.handle).setOnClickListener { setPanel(false) }
         solveBtn = d.findViewById<View>(R.id.solve).apply { setOnClickListener { setPanel(false); launch { engine.analyze() && engine.solve() } } }
         stopBtn = d.findViewById<View>(R.id.stop).apply { setOnClickListener { stop = true; status("Stopping…") } }
-        val holder = d.findViewById<android.widget.FrameLayout>(R.id.mapHolder)
-        val map = MapView(holder.context).also { holder.addView(it) }
-        map.drawing = mapView?.drawing // keep the map when the drawer is rebuilt (theme change)
-        mapView = map
-        mapHolder = holder
-        mapChip = d.findViewById<com.google.android.material.chip.Chip>(R.id.map).apply {
-            isChecked = mapShown
-            setOnClickListener {
-                mapShown = isChecked
-                if (mapShown && engine.board == null) status("Map shows the whole level once Solve has read it")
-                if (!running.get()) mapView?.drawing = engine.mapDrawing()
-                refresh()
-            }
-        }
         panelCard = d
         showStatus(lastStatus)
 
@@ -297,7 +279,6 @@ class SolverService : AccessibilityService(), Device {
         listOfNotNull(solveBtn).forEach { it.visibility = if (busy) View.GONE else View.VISIBLE }
         busyPill?.visibility = if (show && running.get()) View.VISIBLE else View.GONE
         planView?.visibility = if (show && planShown && planView?.drawing != null) View.VISIBLE else View.GONE
-        mapHolder?.visibility = if (mapShown && mapView?.drawing != null) View.VISIBLE else View.GONE
     }
 
     private fun trackTick() {
@@ -336,11 +317,10 @@ class SolverService : AccessibilityService(), Device {
 
     override fun boardShift(dx: Float, dy: Float, ms: Long) = onMain { planView?.shift(dx, dy, ms) }
 
-    override fun arrowLeaving(id: Int, cells: FloatArray, dx: Int, dy: Int) = onMain { planView?.leave(id, cells, dx, dy) }
-
-    override fun showMap(d: MapDrawing?) {
-        main.post { mapView?.drawing = d; refresh() }
+    override fun arrowLeaving(id: Int, cells: FloatArray, dx: Int, dy: Int, delayMs: Long) {
+        main.postDelayed({ planView?.leave(id, cells, dx, dy) }, delayMs)
     }
+
 
     override fun showPlan(d: PlanDrawing?) {
         onMain { planView?.drawing = d; planView?.invalidate(); refresh() }
@@ -546,6 +526,16 @@ class SolverService : AccessibilityService(), Device {
 
     override fun tap(x: Float, y: Float) = gesture(Path().apply { moveTo(x, y) }, 60)
 
+    override fun taps(points: List<Pair<Float, Float>>, gapMs: Long): Boolean {
+        // a gesture holds at most getMaxStrokeCount() strokes: send longer batches in parts
+        for (part in points.chunked(GestureDescription.getMaxStrokeCount())) {
+            val g = GestureDescription.Builder()
+            part.forEachIndexed { i, (x, y) -> g.addStroke(GestureDescription.StrokeDescription(Path().apply { moveTo(x, y) }, i * gapMs, 40)) }
+            if (!dispatch(g.build(), (part.size - 1) * gapMs + 40)) return false
+        }
+        return true
+    }
+
     override fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long) =
         gesture(Path().apply { moveTo(x1, y1); lineTo(x2, y2) }, ms)
 }
@@ -651,7 +641,7 @@ class PlanView(private val ctx: Context) : View(ctx) {
         val d = drawing ?: return
         getLocationOnScreen(loc)
         // the game's top bar (title, hearts, Hint, progress bar) sits over its board: keep our drawing under it too
-        c.clipRect(0f, (BAND_TOP * rootView.height).toFloat() - loc[1], width.toFloat(), height.toFloat())
+        c.clipRect(0f, (TOP_BAR * rootView.height).toFloat() - loc[1], width.toFloat(), height.toFloat())
         c.translate(m[0] - loc[0], m[1] - loc[1]); c.scale(m[2], m[3])
         for ((k, sh) in shapes.withIndex()) if (d.ids[k] !in gone) arrow(c, sh.path, sh.color, sh.tx, sh.ty, sh.hx, sh.hy, sh.deg)
         val now = android.os.SystemClock.uptimeMillis()
@@ -705,55 +695,6 @@ class PlanView(private val ctx: Context) : View(ctx) {
         /** Cells our sliding arrow may stretch at each end to keep the game's covered (measured scatter ~0.5 cell). */
         const val SLACK = 0.6f
         fun angle(dx: Float, dy: Float) = Math.toDegrees(kotlin.math.atan2(dx.toDouble(), -dy.toDouble())).toFloat()
-    }
-}
-
-/**
- * Whole-level map inside the drawer: a small, view-only reference (green = can go now, orange = blocked,
- * red = waiting). Each arrow is drawn tail to head with a real arrowhead, like the game's own arrows.
- */
-class MapView(ctx: Context) : View(ctx) {
-    var drawing: MapDrawing? = null
-        set(v) { field = v; requestLayout(); invalidate() }
-    private val maxH = 180 * ctx.resources.displayMetrics.density
-    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-
-    init { contentDescription = "Map of the whole level" }
-
-    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
-        val w = MeasureSpec.getSize(widthSpec)
-        val d = drawing
-        val h = if (d == null) 0 else minOf(maxH, w * (d.h + 1f) / (d.w + 1f)).toInt()
-        setMeasuredDimension(w, h)
-    }
-
-    override fun onDraw(c: Canvas) {
-        val d = drawing ?: return
-        val cell = minOf(width / (d.w + 1f), height / (d.h + 1f))
-        val left = (width - cell * (d.w + 1)) / 2; val top = (height - cell * (d.h + 1)) / 2
-        stroke.strokeWidth = maxOf(1.5f, cell * 0.22f)
-        for ((pts, color) in d.paths) {
-            stroke.color = color; fill.color = color
-            fun x(i: Int) = left + (pts[i] + 1f) * cell
-            fun y(i: Int) = top + (pts[i + 1] + 1f) * cell
-            val p = Path()
-            for (i in pts.indices step 2) if (i == 0) p.moveTo(x(i), y(i)) else p.lineTo(x(i), y(i))
-            c.drawPath(p, stroke)
-            // arrowhead at the head (last point), pointing along the last step
-            val n = pts.size
-            val hx = x(n - 2); val hy = y(n - 2)
-            var dx = 0f; var dy = -1f
-            if (n >= 4) { dx = hx - x(n - 4); dy = hy - y(n - 4); val l = kotlin.math.hypot(dx, dy); if (l > 0f) { dx /= l; dy /= l } }
-            val len = maxOf(4f, cell * 0.9f); val half = len * 0.55f
-            val tip = Path().apply {
-                moveTo(hx + dx * len * 0.5f, hy + dy * len * 0.5f)
-                lineTo(hx - dx * len * 0.5f - dy * half, hy - dy * len * 0.5f + dx * half)
-                lineTo(hx - dx * len * 0.5f + dy * half, hy - dy * len * 0.5f - dx * half)
-                close()
-            }
-            c.drawPath(tip, fill)
-        }
     }
 }
 
